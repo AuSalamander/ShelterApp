@@ -35,4 +35,9 @@ def get_all_animals():
     conn.close()
     return rows
 
-# сюда можно добавить update_animal, delete_animal
+def delete_animal(animal_id):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('DELETE FROM animals WHERE id = ?', (animal_id,))
+    conn.commit()
+    conn.close()
