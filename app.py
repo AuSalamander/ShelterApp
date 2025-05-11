@@ -3,6 +3,13 @@ from tkinter import ttk, messagebox
 import database  # файл database.py
 from datetime import date
 
+# номер колонки в Treeview → имя поля в БД
+COLUMN_MAP = {
+    "#2": "name",
+    "#3": "species",
+    "#4": "age",
+    "#5": "arrival_date"
+}
 # Инициализация БД
 database.init_db()
 
@@ -19,6 +26,40 @@ def on_tree_click(event):
         if messagebox.askyesno("Подтверждение", f"Удалить запись ID {animal_id}?"):
             database.delete_animal(animal_id)
             refresh_list()
+
+def on_double_click(event):
+    # работаем только с ячейками
+    if tree.identify("region", event.x, event.y) != "cell":
+        return
+    col = tree.identify_column(event.x)
+    # редактируем только колонки, что есть в мапе
+    if col not in COLUMN_MAP:
+        return
+    row = tree.identify_row(event.y)
+    if not row:
+        return
+
+    # координаты ячейки
+    x, y, width, height = tree.bbox(row, col)
+    old_value = tree.set(row, col)
+
+    # создаём Entry прямо над ячейкой
+    entry = tk.Entry(tree)
+    entry.place(x=x, y=y, width=width, height=height)
+    entry.insert(0, old_value)
+    entry.focus()
+
+    def save_edit(e):
+        new_value = entry.get()
+        animal_id = tree.item(row)['values'][0]
+        field = COLUMN_MAP[col]
+        database.update_animal_field(animal_id, field, new_value)
+        entry.destroy()
+        refresh_list()
+
+    # сохраняем на уходе фокуса и на Enter
+    entry.bind("<FocusOut>", save_edit)
+    entry.bind("<Return>", save_edit)
 
 def add():
     name = entry_name.get().strip()
@@ -100,11 +141,11 @@ ttk.Label(frm_inputs, text="Вид").grid(row=1, column=0, sticky="w")
 entry_species = ttk.Entry(frm_inputs)
 entry_species.grid(row=1, column=1, sticky="ew", padx=5)
 
-ttk.Label(frm_inputs, text="Возраст").grid(row=2, column=0, sticky="w")
+ttk.Label(frm_inputs, text="Возраст (месяцов)").grid(row=2, column=0, sticky="w")
 entry_age = ttk.Entry(frm_inputs)
 entry_age.grid(row=2, column=1, sticky="ew", padx=5)
 
-ttk.Label(frm_inputs, text="Дата (YYYY-MM-DD)").grid(row=3, column=0, sticky="w")
+ttk.Label(frm_inputs, text="Дата поступления (YYYY-MM-DD)").grid(row=3, column=0, sticky="w")
 entry_arrival = ttk.Entry(frm_inputs)
 entry_arrival.grid(row=3, column=1, sticky="ew", padx=5)
 
@@ -121,7 +162,7 @@ btn_refresh.grid(row=0, column=1, sticky="ew", padx=5)
 
 
 # Таблица
-columns = ("ID", "Имя", "Вид", "Возраст", "Дата", "Del")
+columns = ("ID", "Имя", "Вид", "Возраст (месяцов)", "Дата поступления", "Del")
 tree = ttk.Treeview(root, columns=columns, show='headings')
 for idx, col in enumerate(columns):
     tree.heading(col, text=col)
@@ -142,6 +183,7 @@ scroll.grid(row=5, column=2, sticky="ns")
 root.bind('<F11>', toggle_fullscreen)
 root.bind('<Escape>', end_fullscreen)
 tree.bind("<Button-1>", on_tree_click)
+tree.bind("<Double-1>", on_double_click)
 
 # Запуск
 refresh_list()

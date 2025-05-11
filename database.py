@@ -41,3 +41,12 @@ def delete_animal(animal_id):
     cur.execute('DELETE FROM animals WHERE id = ?', (animal_id,))
     conn.commit()
     conn.close()
+
+def update_animal_field(animal_id, field, value):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    # осторожно: field берётся из доверенной мапы, не из пользовательского ввода
+    query = f'UPDATE animals SET {field} = ? WHERE id = ?'
+    cur.execute(query, (value, animal_id))
+    conn.commit()
+    conn.close()
