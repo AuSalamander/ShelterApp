@@ -7,8 +7,10 @@ from datetime import date
 COLUMN_MAP = {
     "#2": "name",
     "#3": "species",
-    "#4": "age",
-    "#5": "arrival_date"
+    "#4": "birth_date",
+    "#5": "age_months",   
+    "#6": "arrival_date",
+    "#7": "Del",
 }
 # Инициализация БД
 database.init_db()
@@ -21,7 +23,7 @@ def on_tree_click(event):
     col = tree.identify_column(event.x)
     row = tree.identify_row(event.y)
     # проверяем, что это ячейка столбца Del (это шестой столбец: "#6")
-    if region == "cell" and col == "#6" and row:
+    if region == "cell" and col == "#7" and row:
         animal_id = tree.item(row)['values'][0]
         if messagebox.askyesno("Подтверждение", f"Удалить запись ID {animal_id}?"):
             database.delete_animal(animal_id)
@@ -64,33 +66,43 @@ def on_double_click(event):
 def add():
     name = entry_name.get().strip()
     species = entry_species.get().strip()
-    age_text = entry_age.get().strip()
+    bd = entry_birth.get().strip()
+    est = entry_est.get().strip()
     arrival = entry_arrival.get().strip() or date.today().isoformat()
-    try:
-        age = int(age_text) if age_text else 0
-    except ValueError:
-        messagebox.showwarning("Ошибка", "Возраст должен быть числом")
-        return
     if not name:
-        messagebox.showwarning("Ошибка", "Имя обязательно")
-        return
-    database.add_animal(name, species, age, arrival)
+        messagebox.showwarning("Ошибка", "Имя обязательно"); return
+    # проверяем ввод
+    if bd:
+        # если указали дату рождения — вычисляем месяцы
+        try:
+            y, m, d = map(int, bd.split('-'))
+            bdate = date(y, m, d)
+            delta = date.today().year*12 + date.today().month - (y*12 + m)
+            age_m = delta
+            est_flag = 0
+        except:
+            messagebox.showwarning("Ошибка", "Неверный формат даты рождения"); return
+    elif est:
+        try:
+            age_m = int(est)
+            est_flag = 1
+            bdate = None
+        except:
+            messagebox.showwarning("Ошибка", "Оценка должна быть числом"); return
+    else:
+        messagebox.showwarning("Ошибка", "Укажите дату рождения или оценку возраста"); return
+    database.add_animal(name, species, bdate.isoformat() if bdate else None, age_m, est_flag, arrival)
     messagebox.showinfo("Готово", "Животное добавлено")
     refresh_list()
 
 
 def refresh_list():
-    for row in tree.get_children():
-        tree.delete(row)
-    for animal in database.get_all_animals():
-        tree.insert('', 'end', values=(
-            animal[0],  # ID
-            animal[1],  # имя
-            animal[2],  # вид
-            animal[3],  # возраст
-            animal[4],  # дата
-            "🗑"         # иконка удаления
-        ))
+    tree.delete(*tree.get_children())
+    for id_, name, species, bd, months, est_flag, arr in database.get_all_animals():
+        bd_disp = bd or ""
+        age_disp = f"~{months}" if est_flag else str(months)
+        arr_disp = arr or ""
+        tree.insert('', 'end', values=(id_, name, species, bd_disp, age_disp, arr_disp, "🗑"))
 
 
 def toggle_fullscreen(event=None):
@@ -125,6 +137,10 @@ fullscreen = False
 root.rowconfigure(5, weight=1)
 root.columnconfigure(0, weight=1)
 root.columnconfigure(1, weight=1)
+root.columnconfigure(2, weight=0)  # третья колонка с кнопкой
+
+# строка 5 (где будет таблица) тоже растягивается
+root.rowconfigure(5, weight=1)
 
 # Поля ввода
 frm_inputs = ttk.Frame(root, padding=(10, 10))
@@ -141,13 +157,17 @@ ttk.Label(frm_inputs, text="Вид").grid(row=1, column=0, sticky="w")
 entry_species = ttk.Entry(frm_inputs)
 entry_species.grid(row=1, column=1, sticky="ew", padx=5)
 
-ttk.Label(frm_inputs, text="Возраст (месяцов)").grid(row=2, column=0, sticky="w")
-entry_age = ttk.Entry(frm_inputs)
-entry_age.grid(row=2, column=1, sticky="ew", padx=5)
+ttk.Label(frm_inputs, text="Дата рождения (YYYY-MM-DD)").grid(row=2, column=0, sticky="w")
+entry_birth = ttk.Entry(frm_inputs)
+entry_birth.grid(row=2, column=1, sticky="ew", padx=5)
 
-ttk.Label(frm_inputs, text="Дата поступления (YYYY-MM-DD)").grid(row=3, column=0, sticky="w")
+ttk.Label(frm_inputs, text="ИЛИ оценка возраста (месяцы)").grid(row=3, column=0, sticky="w")
+entry_est = ttk.Entry(frm_inputs)
+entry_est.grid(row=3, column=1, sticky="ew", padx=5)
+
+ttk.Label(frm_inputs, text="Дата поступления (YYYY-MM-DD)").grid(row=4, column=0, sticky="w")
 entry_arrival = ttk.Entry(frm_inputs)
-entry_arrival.grid(row=3, column=1, sticky="ew", padx=5)
+entry_arrival.grid(row=4, column=1, sticky="ew", padx=5)
 
 # Кнопки
 frm_buttons = ttk.Frame(root, padding=(10, 5))
@@ -162,16 +182,18 @@ btn_refresh.grid(row=0, column=1, sticky="ew", padx=5)
 
 
 # Таблица
-columns = ("ID", "Имя", "Вид", "Возраст (месяцов)", "Дата поступления", "Del")
+columns = ("ID", "Имя", "Вид", "Дата рождения (YYYY-MM-DD)", "Возраст (мес.)", "Дата поступления (YYYY-MM-DD)", "Del")
 tree = ttk.Treeview(root, columns=columns, show='headings')
 for idx, col in enumerate(columns):
     tree.heading(col, text=col)
     tree.column(col, anchor="center")
 tree.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=10, pady=5)
 for col in columns:
-    heading = "" if col == "Del" else col
+    heading = col
     tree.heading(col, text=heading)
-# столбец с иконкой удаления
+
+# по умолчанию все колонки растягиваем, но Del остаётся узкой
+tree.column("Дата поступления (YYYY-MM-DD)", anchor="center")
 tree.column("Del", width=30, anchor="center")
 
 # Поддержка прокрутки
