@@ -5,59 +5,66 @@ DB_NAME = 'shelter.db'
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    # 1) создаём таблицу, если её совсем нет
+    # Создаём таблицу, если её нет
     cur.execute('''
         CREATE TABLE IF NOT EXISTS animals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            species TEXT
+            species TEXT,
+            birth_date TEXT,
+            age_estimated INTEGER NOT NULL DEFAULT 0,
+            arrival_date TEXT,
+            cage_number TEXT,
+            quarantine_until TEXT
         )
     ''')
-    # 2) узнаём, какие колонки есть
-    cur.execute("PRAGMA table_info(animals)")
-    existing = {row[1] for row in cur.fetchall()}
-
-    # 3) добавляем недостающие столбцы по очереди
-    if 'birth_date' not in existing:
-        cur.execute("ALTER TABLE animals ADD COLUMN birth_date TEXT")
-    if 'age_months' not in existing:
-        cur.execute("ALTER TABLE animals ADD COLUMN age_months INTEGER NOT NULL DEFAULT 0")
-    if 'age_estimated' not in existing:
-        cur.execute("ALTER TABLE animals ADD COLUMN age_estimated INTEGER NOT NULL DEFAULT 0")
-    if 'arrival_date' not in existing:
-        cur.execute("ALTER TABLE animals ADD COLUMN arrival_date TEXT")
-
-    conn.commit()
-    conn.close()
-
-def add_animal(name, species, birth_date, age_months, age_estimated, arrival_date):
-    """
-    Добавляет животное с учётом даты рождения или оценки возраста.
-    birth_date: строка 'YYYY-MM-DD' или None
-    age_months: целое число месяцев
-    age_estimated: 1 если это оценка, 0 если вычислено из birth_date
-    arrival_date: строка 'YYYY-MM-DD'
-    """
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-        INSERT INTO animals
-            (name, species, birth_date, age_months, age_estimated, arrival_date)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (name, species, birth_date, age_months, age_estimated, arrival_date))
     conn.commit()
     conn.close()
 
 def get_all_animals():
+    """
+    Возвращает кортежи:
+    (id, name, species, birth_date, age_estimated, arrival_date, cage_number, quarantine_until)
+    """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute('''
-        SELECT id, name, species, birth_date, age_months, age_estimated, arrival_date
+        SELECT id, name, species, birth_date, age_estimated,
+               arrival_date, cage_number, quarantine_until
         FROM animals
     ''')
     rows = cur.fetchall()
     conn.close()
     return rows
+
+def get_all_cage_numbers():
+    """
+    Возвращает список всех занятых cage_number (строки) из БД.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('SELECT cage_number FROM animals WHERE cage_number IS NOT NULL')
+    rows = [row[0] for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+def add_animal(name, species, birth_date, age_estimated,
+               arrival_date, cage_number, quarantine_until):
+    """
+    Добавляет животное с указанием клетки и срока карантина.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO animals
+            (name, species, birth_date, age_estimated,
+             arrival_date, cage_number, quarantine_until)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (name, species, birth_date, age_estimated,
+          arrival_date, cage_number, quarantine_until))
+    conn.commit()
+    conn.close()
+
 
 def delete_animal(animal_id):
     conn = sqlite3.connect(DB_NAME)
