@@ -2,6 +2,26 @@ import sqlite3
 
 DB_NAME = 'shelter.db'
 
+def update_adoption_field(adoption_id, field, value):
+    """
+    Обновляет одно из полей в таблице adoptions:
+      owner_name, owner_contact или adoption_date
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    # Список разрешённых полей
+    if field not in ("owner_name", "owner_contact", "adoption_date"):
+        conn.close()
+        raise ValueError(f"Недопустимое поле для обновления: {field}")
+
+    cur.execute(
+        f'UPDATE adoptions SET {field} = ? WHERE id = ?',
+        (value, adoption_id)
+    )
+    conn.commit()
+    conn.close()
+
 def init_db():
     """
     Создаёт (при необходимости) таблицы animals и adoptions.

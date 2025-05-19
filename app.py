@@ -29,6 +29,7 @@ for section in cfg.sections():
     # у нас в секции нет ключ=значение, а просто строки
     breeds = [k for k in cfg[section].keys()]
     species_map[section] = breeds
+today = date.today()
 
 # Функции действий
 
@@ -206,6 +207,45 @@ def on_double_click(event):
     entry.bind("<Return>", save_edit)
     entry.bind("<FocusOut>", save_edit)
 
+def on_adopted_double_click(event):
+    if tree_adopted.identify("region", event.x, event.y) != "cell":
+        return
+    col_id = tree_adopted.identify_column(event.x)
+    field = COLUMN_MAP_ADOPTED.get(col_id)
+    if not field:
+        return  # эту колонку не редактируем
+
+    row_id = tree_adopted.identify_row(event.y)
+    if not row_id:
+        return
+
+    # вот здесь заменили:
+    adoption_id = int(row_id)
+
+    x, y, width, height = tree_adopted.bbox(row_id, col_id)
+    old_value = tree_adopted.set(row_id, col_id)
+    entry = tk.Entry(tree_adopted)
+    entry.place(x=x, y=y, width=width, height=height)
+    entry.insert(0, old_value)
+    entry.focus()
+
+    def save_edit(e):
+        new_value = entry.get().strip()
+        # валидация даты передачи
+        if field == "adoption_date":
+            try:
+                date.fromisoformat(new_value)
+            except ValueError:
+                messagebox.showwarning("Ошибка", "Неверный формат даты")
+                entry.focus()
+                return
+
+        database.update_adoption_field(adoption_id, field, new_value)
+        entry.destroy()
+        refresh_adopted_list()
+
+    entry.bind("<Return>", save_edit)
+    entry.bind("<FocusOut>", save_edit)
 
 def add():
     name = entry_name.get().strip()
@@ -504,11 +544,26 @@ columns_adopted = (
     "Дата рождения", "Возраст (мес.)", "Дата поступления",
     "Имя владельца", "Контакт", "Дата передачи"
 )
+
+# сопоставляем col_id → имя поля в adoptions
+COLUMN_MAP_ADOPTED = {
+    "#1": None,               # "ID животного" — не редактируем
+    "#2": None,               # "Имя" — snapshot, можно не править
+    "#3": None,               # "Вид" — snapshot, не правим
+    "#4": None,               # "Дата рождения" — snapshot
+    "#5": None,               # "Возраст (мес.)" — snapshot
+    "#6": None,               # "Дата поступления" — snapshot
+    "#7": "owner_name",       # редактируем имя владельца
+    "#8": "owner_contact",    # редактируем контакт
+    "#9": "adoption_date",    # редактируем дату передачи
+}
+
 tree_adopted = ttk.Treeview(
     frm_adopt,
     columns=columns_adopted,
     show='headings'
 )
+
 # обычный вертикальный
 vsb2 = ttk.Scrollbar(frm_adopt, orient='vertical', command=tree_adopted.yview)
 tree_adopted.configure(yscrollcommand=vsb2.set)
@@ -529,28 +584,28 @@ for c in columns_adopted:
 
 def refresh_adopted_list():
     tree_adopted.delete(*tree_adopted.get_children())
-    today = date.today()
 
     for rec in database.get_all_adoptions():
-        # rec = (id, animal_id, name, species,
-        #        birth_date, age_estimated, arrival_date,
-        #        owner_name, owner_contact, adoption_date)
-        (_, animal_id, name, species, bd, est_flag,
+        # rec = (id, animal_id, name,...,owner,contact,ad_date)
+        (adopt_id, animal_id, name, species, bd, est_flag,
          arr, owner, contact, ad_date) = rec
 
-        # пересчитать возраст
         bdate = date.fromisoformat(bd)
         months = (today.year*12 + today.month) - (bdate.year*12 + bdate.month)
         age_disp = f"~{months}" if est_flag else str(months)
         bd_disp  = f"~{bd}" if est_flag else bd
         arr_disp = arr or ""
-
-        tree_adopted.insert('', 'end', values=(
+        values = (
             animal_id, name, species,
             bd_disp, age_disp, arr_disp,
             owner, contact, ad_date
-        ))
-
+        )
+        # сохраняем adopt_id в tags, чтобы потом знать, какую запись править
+        tree_adopted.insert(
+            '', 'end',
+            iid=str(adopt_id),   # или tags=[str(adopt_id)]
+            values=values
+        )
     autofit_columns(tree_adopted, columns_adopted)
 
 # === Инициализация и первый показ данных ===
@@ -577,6 +632,7 @@ root.bind("<F11>", toggle_fullscreen)
 root.bind("<Escape>", lambda e: toggle_fullscreen() if fullscreen else None)
 tree.bind("<Button-1>", on_tree_click)
 tree.bind("<Double-1>", on_double_click)
+tree_adopted.bind("<Double-1>", on_adopted_double_click)
 
 # словарь для хранения ID таймеров мигания
 blink_timers = {}
