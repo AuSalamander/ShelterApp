@@ -67,8 +67,20 @@ def open_adopt_dialog(animal_id):
             messagebox.showwarning("Ошибка", "Неверный формат даты")
             return
         # Сохраняем в adoptions и удаляем из animals
-        database.add_adoption(animal_id, owner, contact, ad_date)
+            # Сначала получаем snapshot данных животного
+        row = database.get_animal_by_id(animal_id)
+        # row = (id, name, species, birth_date, age_estimated, arrival_date, cage, quarantine)
+        _, name, species, bd, est_flag, arr, _, _ = row
+
+        # Сохраняем в adoptions вместе с данными животного
+        database.add_adoption(
+            animal_id,
+            name, species, bd, est_flag, arr,
+            owner, contact, ad_date
+        )
+        # Только потом удаляем из основной таблицы
         database.delete_animal(animal_id)
+
         dlg.destroy()
         refresh_list()
         refresh_adopted_list()
@@ -432,7 +444,7 @@ tree.column("Дата рождения", width=100, anchor='center')
 tree.column("Возраст (мес.)", width=90, anchor='center')
 tree.column("Дата поступления", width=100, anchor='center')
 tree.column("Клетка", width=70, anchor='center')
-tree.column("Осталось дней карантина", width=120, anchor='center')
+tree.column("Осталось дней карантина", width=150, anchor='center')
 tree.column("Adopt", width=30, anchor='center')
 tree.column("Del", width=30, anchor='center')
 
@@ -491,23 +503,27 @@ for c in columns_adopted:
 def refresh_adopted_list():
     tree_adopted.delete(*tree_adopted.get_children())
     today = date.today()
-    for id_, animal_id, owner, contact, ad_date in database.get_all_adoptions():
-        # подтягиваем данные животного
-        row = database.get_animal_by_id(animal_id)
-        # row = (id, name, species, birth_date, age_estimated, arrival_date, cage, quarantine)
-        _, name, species, bd, est_flag, arr, _, _ = row
-        # вычисляем возраст по bd
+
+    for rec in database.get_all_adoptions():
+        # rec = (id, animal_id, name, species,
+        #        birth_date, age_estimated, arrival_date,
+        #        owner_name, owner_contact, adoption_date)
+        (_, animal_id, name, species, bd, est_flag,
+         arr, owner, contact, ad_date) = rec
+
+        # пересчитать возраст
         bdate = date.fromisoformat(bd)
         months = (today.year*12 + today.month) - (bdate.year*12 + bdate.month)
         age_disp = f"~{months}" if est_flag else str(months)
         bd_disp  = f"~{bd}" if est_flag else bd
         arr_disp = arr or ""
+
         tree_adopted.insert('', 'end', values=(
             animal_id, name, species,
             bd_disp, age_disp, arr_disp,
             owner, contact, ad_date
         ))
-    # **тут — автоматически подгоняем ширины колонок**
+
     autofit_columns(tree_adopted, columns_adopted)
 
 # === Инициализация и первый показ данных ===
