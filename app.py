@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, font
 import database  # файл database.py
 from datetime import date, timedelta
 import re 
@@ -12,12 +12,69 @@ COLUMN_MAP = {
     "#6": "arrival_date",        # колонка «Дата поступления»
     "#7": "cage_number",         # колонка «Клетка»
     "#8": "quarantine_until",    # колонка «Осталось дней карантина»
-    # столбец "#9" — это «Del», его не редактируем
 }
 # Инициализация БД
+import database
 database.init_db()
 
+# Переменные
+blink_timers = {}
+fullscreen = False
+
 # Функции действий
+
+def autofit_columns(tree, columns, padding=10):
+    """
+    Для каждой колонки считает максимальную ширину текста (заголовка + всех ячеек)
+    и выставляет её с небольшим отступом padding.
+    """
+    # Используем дефолтный шрифт приложения
+    tv_font = font.nametofont("TkDefaultFont")
+
+    for col in columns:
+        # измерим ширину заголовка
+        max_width = tv_font.measure(col)
+        # измерим каждую ячейку в этой колонке
+        for item in tree.get_children():
+            cell_text = str(tree.set(item, col))
+            w = tv_font.measure(cell_text)
+            if w > max_width:
+                max_width = w
+        # выставляем ширину + padding
+        tree.column(col, width=max_width + padding)
+
+def open_adopt_dialog(animal_id):
+    dlg = tk.Toplevel(root)
+    dlg.title("Передача животного")
+    ttk.Label(dlg, text="Имя владельца").grid(row=0, column=0, sticky='w', pady=2)
+    ent_owner = ttk.Entry(dlg); ent_owner.grid(row=0, column=1, pady=2)
+    ttk.Label(dlg, text="Контакт владельца").grid(row=1, column=0, sticky='w', pady=2)
+    ent_contact = ttk.Entry(dlg); ent_contact.grid(row=1, column=1, pady=2)
+    ttk.Label(dlg, text="Дата передачи (YYYY-MM-DD)").grid(row=2, column=0, sticky='w', pady=2)
+    ent_date = ttk.Entry(dlg); ent_date.grid(row=2, column=1, pady=2)
+    ent_date.insert(0, date.today().isoformat())
+
+    def confirm():
+        owner = ent_owner.get().strip()
+        contact = ent_contact.get().strip()
+        ad_date = ent_date.get().strip()
+        if not owner or not contact:
+            messagebox.showwarning("Ошибка", "Укажите имя и контакт владельца")
+            return
+        try:
+            date.fromisoformat(ad_date)
+        except ValueError:
+            messagebox.showwarning("Ошибка", "Неверный формат даты")
+            return
+        # Сохраняем в adoptions и удаляем из animals
+        database.add_adoption(animal_id, owner, contact, ad_date)
+        database.delete_animal(animal_id)
+        dlg.destroy()
+        refresh_list()
+        refresh_adopted_list()
+
+    ttk.Button(dlg, text="Подтвердить", command=confirm).grid(row=3, column=0, pady=5)
+    ttk.Button(dlg, text="Отмена",    command=dlg.destroy).grid(row=3, column=1, pady=5)
 
 def blink_row(item):
     current = list(tree.item(item, 'tags'))
@@ -57,6 +114,17 @@ def on_tree_click(event):
         if messagebox.askyesno("Подтверждение", f"Удалить ID {animal_id}?"):
             database.delete_animal(animal_id)
             refresh_list()
+        re
+
+    # Приём животного
+    if col_name == "Adopt":
+        row_id = tree.identify_row(event.y)
+    if not row_id:
+        return
+    animal_id = tree.item(row_id)["values"][0]
+    open_adopt_dialog(animal_id)
+    return
+
 
 
 def on_double_click(event):
@@ -168,7 +236,7 @@ def add():
     except ValueError:
         messagebox.showwarning("Ошибка", "Неправильный формат даты окончания карантина")
         return
-
+    
     database.add_animal(
         name,
         species,
@@ -214,14 +282,26 @@ def refresh_list():
                 tags = ('quarantine',)
             else:
                 tags = ('expired',)
-
+        
         values = (
             id_, name, species,
             bd_disp, age_disp,
             arr or "",
-            cage, days_left, "🗑"
+            cage, days_left, "🤝", "🗑"
         )
-        item = tree.insert('', 'end', values=values, tags=tags)
+        item = tree.insert(
+            '',
+            'end',
+            values=(
+                id_, name, species,
+                bd_disp, age_disp,
+                arr,
+                cage, days_left,
+                "🤝",   # иконка для приёма
+                "🗑"
+            ),
+            tags=tags
+        )
 
         # если карантин закончился — запускаем мигание
         if 'expired' in tags:
@@ -258,78 +338,67 @@ def get_default_quarantine_cage():
             return f"К{i:04X}"
     raise RuntimeError("Нет свободных карантинных клеток")
 
-# Главное окно
+# === Главное окно ===
 root = tk.Tk()
 root.title("Приют: учёт животных")
-root.columnconfigure(2, weight=1)
-fullscreen = False
-
-# Разрешаем изменение размеров и конфигурируем веса сетки
-root.rowconfigure(5, weight=1)
+root.geometry("900x600")
 root.columnconfigure(0, weight=1)
-root.columnconfigure(1, weight=1)
-root.columnconfigure(2, weight=0)  # третья колонка с кнопкой
+root.rowconfigure(0, weight=1)
 
-# строка 5 (где будет таблица) тоже растягивается
-root.rowconfigure(5, weight=1)
+# === Верх: Notebook с двумя вкладками ===
+notebook = ttk.Notebook(root)
+tab_shelter = ttk.Frame(notebook)
+tab_adopted = ttk.Frame(notebook)
+notebook.add(tab_shelter, text="Приют")
+notebook.add(tab_adopted, text="Переданы")
+notebook.grid(row=0, column=0, sticky="nsew")
+root.rowconfigure(0, weight=1)
+root.columnconfigure(0, weight=1)
 
-# === ФРЕЙМ ДЛЯ ОСНОВНОЙ ИНФОРМАЦИИ ===
+# === Tab “Приют” ===
+# 1) Настройка сетки
+tab_shelter.columnconfigure(0, weight=1)
+tab_shelter.columnconfigure(1, weight=1)
+tab_shelter.rowconfigure(2, weight=1)
 
-
-frm_inputs = ttk.LabelFrame(root, text="Основная информация")
+# 2) Фрейм “Основная информация”
+frm_inputs = ttk.LabelFrame(tab_shelter, text="Основная информация")
 frm_inputs.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
-# Делаем так, чтобы второй столбец (ввод) растягивался,
-# а первый (метки) — нет
 frm_inputs.columnconfigure(0, weight=0)
 frm_inputs.columnconfigure(1, weight=1)
 
 ttk.Label(frm_inputs, text="Имя").grid(row=0, column=0, sticky="w", pady=2)
-entry_name = ttk.Entry(frm_inputs)
-entry_name.grid(row=0, column=1, sticky="ew", pady=2)
+entry_name = ttk.Entry(frm_inputs); entry_name.grid(row=0, column=1, sticky="ew", pady=2)
 
 ttk.Label(frm_inputs, text="Вид").grid(row=1, column=0, sticky="w", pady=2)
-entry_species = ttk.Entry(frm_inputs)
-entry_species.grid(row=1, column=1, sticky="ew", pady=2)
+entry_species = ttk.Entry(frm_inputs); entry_species.grid(row=1, column=1, sticky="ew", pady=2)
 
 ttk.Label(frm_inputs, text="Дата рождения\n(YYYY-MM-DD)").grid(row=2, column=0, sticky="w", pady=2)
-entry_birth = ttk.Entry(frm_inputs)
-entry_birth.grid(row=2, column=1, sticky="ew", pady=2)
+entry_birth = ttk.Entry(frm_inputs); entry_birth.grid(row=2, column=1, sticky="ew", pady=2)
 
 ttk.Label(frm_inputs, text="ИЛИ оценка возраста\n(месяцы)").grid(row=3, column=0, sticky="w", pady=2)
-entry_est = ttk.Entry(frm_inputs)
-entry_est.grid(row=3, column=1, sticky="ew", pady=2)
+entry_est = ttk.Entry(frm_inputs); entry_est.grid(row=3, column=1, sticky="ew", pady=2)
 
 ttk.Label(frm_inputs, text="Дата поступления\n(YYYY-MM-DD)").grid(row=4, column=0, sticky="w", pady=2)
-entry_arrival = ttk.Entry(frm_inputs)
-entry_arrival.grid(row=4, column=1, sticky="ew", pady=2)
+entry_arrival = ttk.Entry(frm_inputs); entry_arrival.grid(row=4, column=1, sticky="ew", pady=2)
 
-
-# === ФРЕЙМ ДЛЯ КЛЕТКИ И КАРАНТИНА ===
-frm_quarantine = ttk.LabelFrame(root, text="Клетка / Карантин")
+# 3) Фрейм “Клетка / Карантин”
+frm_quarantine = ttk.LabelFrame(tab_shelter, text="Клетка / Карантин")
 frm_quarantine.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
 frm_quarantine.columnconfigure(0, weight=0)
 frm_quarantine.columnconfigure(1, weight=1)
 
 ttk.Label(frm_quarantine, text="Клетка").grid(row=0, column=0, sticky="w", pady=2)
-entry_cage = ttk.Entry(frm_quarantine)
-entry_cage.grid(row=0, column=1, sticky="ew", pady=2)
+entry_cage = ttk.Entry(frm_quarantine); entry_cage.grid(row=0, column=1, sticky="ew", pady=2)
 entry_cage.insert(0, get_default_quarantine_cage())
 
 ttk.Label(frm_quarantine, text="Окончание\nкарантина").grid(row=1, column=0, sticky="w", pady=2)
-entry_quarantine = ttk.Entry(frm_quarantine)
-entry_quarantine.grid(row=1, column=1, sticky="ew", pady=2)
+entry_quarantine = ttk.Entry(frm_quarantine); entry_quarantine.grid(row=1, column=1, sticky="ew", pady=2)
 entry_quarantine.insert(0, (date.today() + timedelta(days=10)).isoformat())
 
-
-# Убедитесь, что у root тоже настроены веса,
-# чтобы оба фрейма растягивались поровну:
-root.columnconfigure(0, weight=1)
-root.columnconfigure(1, weight=1)
-
-
-# Кнопки
-frm_buttons = ttk.Frame(root, padding=(10, 5))
-frm_buttons.grid(row=4, column=0, columnspan=2, sticky="ew")
+# 4) Фрейм кнопок
+frm_buttons = ttk.Frame(tab_shelter)
+frm_buttons.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
 frm_buttons.columnconfigure(0, weight=1)
 frm_buttons.columnconfigure(1, weight=1)
 
@@ -338,53 +407,113 @@ btn_add.grid(row=0, column=0, sticky="ew", padx=5)
 btn_refresh = ttk.Button(frm_buttons, text="Обновить список", command=refresh_list)
 btn_refresh.grid(row=0, column=1, sticky="ew", padx=5)
 
-
-# ======= ПЕРЕОПРЕДЕЛЕНИЕ COLUMNS =======
+# 5) Таблица животных
 columns = (
     "ID", "Имя", "Вид",
     "Дата рождения", "Возраст (мес.)",
-    "Дата прибытия",
-    "Клетка", "Осталось дней карантина", "Del"
+    "Дата поступления",
+    "Клетка", "Осталось дней карантина",
+    "Adopt", "Del"
 )
 
-# ======= FRAME ДЛЯ ТАБЛИЦЫ И СКРОЛЛБАРА =======
-table_frame = ttk.Frame(root)
-table_frame.grid(row=5, column=0, columnspan=3, sticky='nsew')
-table_frame.rowconfigure(0, weight=1)
+table_frame = ttk.Frame(tab_shelter)
+table_frame.grid(row=2, column=0, columnspan=2, sticky='nsew', padx=5, pady=5)
 table_frame.columnconfigure(0, weight=1)
+table_frame.rowconfigure(0, weight=1)
 
-
-
-# ======= СОЗДАЁМ Treeview =======
-
-
-
-tree = ttk.Treeview(
-    table_frame,
-    columns=columns,
-    show='headings'
-)
-# Заголовки и базовые ширины
+tree = ttk.Treeview(table_frame, columns=columns, show='headings')
 for col in columns:
-    tree.heading(col, text= col)
-# Настройка отдельных колонок
-tree.column("ID", width=20, anchor='center')
-tree.column("Имя",width=100, anchor='center')
-tree.column("Вид",width=100, anchor='center')
+    tree.heading(col, text=col if col not in ("Adopt", "Del") else "")
+# настраиваем ширины
+tree.column("ID", width=30, anchor='center')
+tree.column("Имя", width=100, anchor='w')
+tree.column("Вид", width=100, anchor='w')
 tree.column("Дата рождения", width=100, anchor='center')
 tree.column("Возраст (мес.)", width=90, anchor='center')
-tree.column("Дата прибытия", width=100, anchor='center')
+tree.column("Дата поступления", width=100, anchor='center')
 tree.column("Клетка", width=70, anchor='center')
-tree.column("Осталось дней карантина", width=150, anchor='center')
+tree.column("Осталось дней карантина", width=120, anchor='center')
+tree.column("Adopt", width=30, anchor='center')
 tree.column("Del", width=30, anchor='center')
 
-# ======= СКРОЛЛБАР =======
 vsb = ttk.Scrollbar(table_frame, orient='vertical', command=tree.yview)
 tree.configure(yscrollcommand=vsb.set)
-
-# ======= РАЗМЕЩЕНИЕ =======
 tree.grid(row=0, column=0, sticky='nsew')
 vsb.grid(row=0, column=1, sticky='ns')
+
+tree.bind("<Button-1>", on_tree_click)
+tree.bind("<Double-1>", on_double_click)
+
+# === Tab “Переданы” ===
+tab_adopted.columnconfigure(0, weight=1)
+tab_adopted.rowconfigure(1, weight=1)
+tab_adopted.grid_propagate(False)
+tab_adopted.rowconfigure(1, weight=1)
+tab_adopted.columnconfigure(0, weight=1)
+
+ttk.Label(tab_adopted, text="Сданные животные", font=("", 14)).grid(row=0, column=0, pady=5)
+
+# Frame для таблицы (растягивается по ширине и высоте)
+frm_adopt = ttk.Frame(tab_adopted)
+frm_adopt.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
+frm_adopt.rowconfigure(0, weight=1)
+frm_adopt.columnconfigure(0, weight=1)
+
+# Новые колонки: убрали собственный ID, добавили все поля из animals
+columns_adopted = (
+    "ID животного", "Имя", "Вид",
+    "Дата рождения", "Возраст (мес.)", "Дата поступления",
+    "Имя владельца", "Контакт", "Дата передачи"
+)
+tree_adopted = ttk.Treeview(
+    frm_adopt,
+    columns=columns_adopted,
+    show='headings'
+)
+# обычный вертикальный
+vsb2 = ttk.Scrollbar(frm_adopt, orient='vertical', command=tree_adopted.yview)
+tree_adopted.configure(yscrollcommand=vsb2.set)
+
+# горизонтальный — чтобы при широкой таблице не “уезжать” за край
+hsb2 = ttk.Scrollbar(frm_adopt, orient='horizontal', command=tree_adopted.xview)
+tree_adopted.configure(xscrollcommand=hsb2.set)
+
+# размещаем
+tree_adopted.grid(row=0, column=0, sticky='nsew')
+vsb2.grid(row=0, column=1, sticky='ns')
+hsb2.grid(row=1, column=0, columnspan=2, sticky='ew')
+
+# Заголовки и авторастяжка
+for c in columns_adopted:
+    tree_adopted.heading(c, text=c)
+    tree_adopted.column(c, anchor='center')
+
+def refresh_adopted_list():
+    tree_adopted.delete(*tree_adopted.get_children())
+    today = date.today()
+    for id_, animal_id, owner, contact, ad_date in database.get_all_adoptions():
+        # подтягиваем данные животного
+        row = database.get_animal_by_id(animal_id)
+        # row = (id, name, species, birth_date, age_estimated, arrival_date, cage, quarantine)
+        _, name, species, bd, est_flag, arr, _, _ = row
+        # вычисляем возраст по bd
+        bdate = date.fromisoformat(bd)
+        months = (today.year*12 + today.month) - (bdate.year*12 + bdate.month)
+        age_disp = f"~{months}" if est_flag else str(months)
+        bd_disp  = f"~{bd}" if est_flag else bd
+        arr_disp = arr or ""
+        tree_adopted.insert('', 'end', values=(
+            animal_id, name, species,
+            bd_disp, age_disp, arr_disp,
+            owner, contact, ad_date
+        ))
+    # **тут — автоматически подгоняем ширины колонок**
+    autofit_columns(tree_adopted, columns_adopted)
+
+# === Инициализация и первый показ данных ===
+database.init_db()
+refresh_list()
+refresh_adopted_list()
 
 # ======= БИНДИНГИ =======
 tree.bind("<Button-1>", on_tree_click)
@@ -395,8 +524,8 @@ tree.tag_configure('quarantine', background='#FFF59D')
 tree.tag_configure('expired', background='#C8E6C9')
 
 # Привязка клавиш
-root.bind('<F11>', toggle_fullscreen)
-root.bind('<Escape>', end_fullscreen)
+root.bind("<F11>", toggle_fullscreen)
+root.bind("<Escape>", lambda e: toggle_fullscreen() if fullscreen else None)
 tree.bind("<Button-1>", on_tree_click)
 tree.bind("<Double-1>", on_double_click)
 
