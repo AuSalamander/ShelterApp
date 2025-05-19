@@ -1,0 +1,14 @@
+[Dog]
+Labrador
+Beagle
+German Shepherd
+
+[Cat]
+Siamese
+Persian
+Maine Coon
+
+[Rabbit]
+Holland Lop
+Netherland Dwarf
+Lionhead

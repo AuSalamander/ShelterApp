@@ -1,3 +1,4 @@
+import configparser
 import tkinter as tk
 from tkinter import ttk, messagebox, font
 import database  # файл database.py
@@ -20,6 +21,14 @@ database.init_db()
 # Переменные
 blink_timers = {}
 fullscreen = False
+species_map = {}
+cfg = configparser.ConfigParser(allow_no_value=True)
+cfg.optionxform = str  # чтобы имена сохранили регистр
+cfg.read('spesies_config.txt', encoding='utf-8')
+for section in cfg.sections():
+    # у нас в секции нет ключ=значение, а просто строки
+    breeds = [k for k in cfg[section].keys()]
+    species_map[section] = breeds
 
 # Функции действий
 
@@ -200,12 +209,17 @@ def on_double_click(event):
 
 def add():
     name = entry_name.get().strip()
-    species = entry_species.get().strip()
+    selected_species = combobox_species.get().strip()
+    breed   = combobox_breed.get().strip()
     bd = entry_birth.get().strip()
     est = entry_est.get().strip()
     arrival = entry_arrival.get().strip() or date.today().isoformat()
     cage = entry_cage.get().strip()
     quarantine_until = entry_quarantine.get().strip()
+    if not selected_species:
+        messagebox.showwarning("Ошибка", "Выберите вид"); return
+    # Собираем «вид / порода»
+    species = f"{selected_species} / {breed}" if breed else species
 
     if not name:
         messagebox.showwarning("Ошибка", "Имя обязательно")
@@ -272,7 +286,7 @@ def refresh_list():
     tree.delete(*tree.get_children())
 
     today = date.today()
-    for (id_, name, species, bd, est_flag,
+    for (id_, name, full_species, bd, est_flag,
          arr, cage, quarantine_until) in database.get_all_animals():
 
         # возраст
@@ -296,7 +310,7 @@ def refresh_list():
                 tags = ('expired',)
         
         values = (
-            id_, name, species,
+            id_, name, full_species,
             bd_disp, age_disp,
             arr or "",
             cage, days_left, "🤝", "🗑"
@@ -305,7 +319,7 @@ def refresh_list():
             '',
             'end',
             values=(
-                id_, name, species,
+                id_, name, full_species,
                 bd_disp, age_disp,
                 arr,
                 cage, days_left,
@@ -383,16 +397,29 @@ ttk.Label(frm_inputs, text="Имя").grid(row=0, column=0, sticky="w", pady=2)
 entry_name = ttk.Entry(frm_inputs); entry_name.grid(row=0, column=1, sticky="ew", pady=2)
 
 ttk.Label(frm_inputs, text="Вид").grid(row=1, column=0, sticky="w", pady=2)
-entry_species = ttk.Entry(frm_inputs); entry_species.grid(row=1, column=1, sticky="ew", pady=2)
+combobox_species = ttk.Combobox(
+    frm_inputs,
+    values=list(species_map.keys()),
+    state="readonly"
+)
+combobox_species.grid(row=1, column=1, sticky="ew", pady=2)
 
-ttk.Label(frm_inputs, text="Дата рождения\n(YYYY-MM-DD)").grid(row=2, column=0, sticky="w", pady=2)
-entry_birth = ttk.Entry(frm_inputs); entry_birth.grid(row=2, column=1, sticky="ew", pady=2)
+ttk.Label(frm_inputs, text="Порода").grid(row=2, column=0, sticky="w", pady=2)
+combobox_breed = ttk.Combobox(
+    frm_inputs,
+    values=[],
+    state="readonly"
+)
+combobox_breed.grid(row=2, column=1, sticky="ew", pady=2)
 
-ttk.Label(frm_inputs, text="ИЛИ оценка возраста\n(месяцы)").grid(row=3, column=0, sticky="w", pady=2)
-entry_est = ttk.Entry(frm_inputs); entry_est.grid(row=3, column=1, sticky="ew", pady=2)
+ttk.Label(frm_inputs, text="Дата рождения\n(YYYY-MM-DD)").grid(row=3, column=0, sticky="w", pady=2)
+entry_birth = ttk.Entry(frm_inputs); entry_birth.grid(row=3, column=1, sticky="ew", pady=2)
 
-ttk.Label(frm_inputs, text="Дата поступления\n(YYYY-MM-DD)").grid(row=4, column=0, sticky="w", pady=2)
-entry_arrival = ttk.Entry(frm_inputs); entry_arrival.grid(row=4, column=1, sticky="ew", pady=2)
+ttk.Label(frm_inputs, text="ИЛИ оценка возраста\n(месяцы)").grid(row=4, column=0, sticky="w", pady=2)
+entry_est = ttk.Entry(frm_inputs); entry_est.grid(row=4, column=1, sticky="ew", pady=2)
+
+ttk.Label(frm_inputs, text="Дата поступления\n(YYYY-MM-DD)").grid(row=5, column=0, sticky="w", pady=2)
+entry_arrival = ttk.Entry(frm_inputs); entry_arrival.grid(row=5, column=1, sticky="ew", pady=2)
 
 # 3) Фрейм “Клетка / Карантин”
 frm_quarantine = ttk.LabelFrame(tab_shelter, text="Клетка / Карантин")
@@ -439,7 +466,7 @@ for col in columns:
 # настраиваем ширины
 tree.column("ID", width=30, anchor='center')
 tree.column("Имя", width=100, anchor='w')
-tree.column("Вид", width=100, anchor='w')
+tree.column("Вид", width=150, anchor='w')
 tree.column("Дата рождения", width=100, anchor='center')
 tree.column("Возраст (мес.)", width=90, anchor='center')
 tree.column("Дата поступления", width=100, anchor='center')
@@ -530,6 +557,12 @@ def refresh_adopted_list():
 database.init_db()
 refresh_list()
 refresh_adopted_list()
+def on_species_selected(event):
+    sp = combobox_species.get()
+    combobox_breed['values'] = species_map.get(sp, [])
+    combobox_breed.set('')  # очистить прошлый выбор
+
+combobox_species.bind("<<ComboboxSelected>>", on_species_selected)
 
 # ======= БИНДИНГИ =======
 tree.bind("<Button-1>", on_tree_click)
