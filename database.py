@@ -1,6 +1,73 @@
 import sqlite3
+import os
+import glob
 
 DB_NAME = 'shelter.db'
+
+def add_event(animal_id: int,
+              etype: str,
+              date_start: str,
+              date_end: str = None,
+              conclusion: str = None,
+              results: str = None):
+    """
+    Добавляет новое событие для животного.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO events
+            (animal_id, type, date_start, date_end, conclusion, results)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (animal_id, etype, date_start, date_end, conclusion, results))
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+
+def get_animal_events(animal_id: int):
+    """
+    Возвращает список кортежей:
+      (type, date_start, date_end_or_None,
+       conclusion_or_empty, doc_paths_list, results_or_empty)
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT type, date_start, date_end, conclusion, results, id
+        FROM events
+        WHERE animal_id = ?
+        ORDER BY date_start
+    ''', (animal_id,))
+    rows = cur.fetchall()           # ← вот здесь получаем rows
+    conn.close()
+
+    # Папка с документами для этого животного
+    docs_dir = os.path.join('docs', str(animal_id))
+
+    events = []
+    for etype, ds, de, concl, results, eid in rows:
+        # для каждого события только свои файлы
+        if os.path.isdir(docs_dir):
+            event_docs = [
+                p for p in glob.glob(f"{docs_dir}/*")
+                if os.path.basename(p).startswith(f"{eid}_")
+            ]
+        else:
+            event_docs = []
+
+        events.append((
+            etype,
+            ds,
+            de,
+            concl or "",
+            event_docs,
+            results or "",
+            eid                # <-- добавили сюда
+        ))
+    return events
+
 
 def update_adoption_field(adoption_id, field, value):
     """
@@ -79,6 +146,21 @@ def init_db():
             completed    INTEGER,
             completed_at TEXT,
             result       TEXT
+        )
+    ''')
+
+    # --- events ---
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            animal_id   INTEGER NOT NULL,
+            type        TEXT    NOT NULL,
+            date_start  TEXT    NOT NULL,
+            date_end    TEXT,           -- может быть NULL
+            conclusion  TEXT,
+            results     TEXT            -- свободный текст/числа в JSON или CSV
+            -- внешний ключ на animals не обязателен, но можно добавить:
+            -- , FOREIGN KEY(animal_id) REFERENCES animals(id)
         )
     ''')
 

@@ -1,12 +1,13 @@
 import configparser
 import tkinter as tk
-from tkinter import ttk, messagebox, font
+from tkinter import ttk, messagebox, font, filedialog
 import database  # файл database.py
 from datetime import date, timedelta
 import re 
 import tkinter.simpledialog as sd
 import os
 import glob
+import shutil
 
 database.init_db()
 
@@ -51,6 +52,75 @@ with open("cfg.txt", encoding="utf-8") as f:
 tip = None
 
 # Функции действий
+
+def open_event_dialog(aid, refresh_cb):
+    dlg = tk.Toplevel(root)
+    name = database.get_animal_by_id(aid)[1]
+    dlg.title(f"Новое событие для #{aid} ({name})")
+
+    # Поля
+    ttk.Label(dlg, text="Тип события:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
+    ent_type = ttk.Entry(dlg); ent_type.grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+
+    ttk.Label(dlg, text="Дата начала (YYYY-MM-DD):").grid(row=1, column=0, sticky='w', padx=5, pady=2)
+    ent_ds = ttk.Entry(dlg); ent_ds.grid(row=1, column=1, sticky='ew', padx=5, pady=2)
+
+    ttk.Label(dlg, text="Дата окончания (опционально):").grid(row=2, column=0, sticky='w', padx=5, pady=2)
+    ent_de = ttk.Entry(dlg); ent_de.grid(row=2, column=1, sticky='ew', padx=5, pady=2)
+
+    ttk.Label(dlg, text="Заключение:").grid(row=3, column=0, sticky='nw', padx=5, pady=2)
+    txt_concl = tk.Text(dlg, height=4); txt_concl.grid(row=3, column=1, sticky='ew', padx=5, pady=2)
+
+    ttk.Label(dlg, text="Результаты:").grid(row=4, column=0, sticky='nw', padx=5, pady=2)
+    txt_res = tk.Text(dlg, height=4); txt_res.grid(row=4, column=1, sticky='ew', padx=5, pady=2)
+
+    # Выбор документов
+    doc_paths = []
+    def choose_docs():
+        files = filedialog.askopenfilenames(title="Выберите файлы")
+        if files:
+            doc_paths[:] = files
+            lbl_docs.config(text=f"{len(files)} файл(ов) выбрано")
+    btn_docs = ttk.Button(dlg, text="Прикрепить документы…", command=choose_docs)
+    btn_docs.grid(row=5, column=0, columnspan=2, pady=5)
+    lbl_docs = ttk.Label(dlg, text="Файлы не выбраны")
+    lbl_docs.grid(row=6, column=0, columnspan=2, pady=(0,5))
+
+    # кнопки
+    def on_confirm():
+        etype = ent_type.get().strip()
+        ds = ent_ds.get().strip()
+        de = ent_de.get().strip() or None
+        concl = txt_concl.get("1.0", "end").strip() or None
+        res = txt_res.get("1.0", "end").strip() or None
+        if not etype or not ds:
+            messagebox.showwarning("Ошибка", "Укажите тип и дату начала")
+            return
+
+        # 1) создаём запись
+        eid = database.add_event(aid, etype, ds, de, concl, res)
+
+        # 2) копируем файлы (если есть) в docs/aid/ с префиксом eid_
+        dest_dir = os.path.join("docs", str(aid))
+        os.makedirs(dest_dir, exist_ok=True)
+        for p in doc_paths:
+            fn = f"{eid}_{os.path.basename(p)}"
+            shutil.copy(p, os.path.join(dest_dir, fn))
+
+        dlg.destroy()
+        refresh_cb()
+
+    frm_btn = ttk.Frame(dlg)
+    frm_btn.grid(row=7, column=0, columnspan=2, pady=10)
+    ttk.Button(frm_btn, text="Отмена", command=dlg.destroy).grid(row=0, column=0, padx=5)
+    ttk.Button(frm_btn, text="Создать", command=on_confirm).grid(row=0, column=1, padx=5)
+
+    # растягиваем поля
+    dlg.columnconfigure(1, weight=1)
+    dlg.transient(root)
+    dlg.grab_set()
+    ent_type.focus()
+
 
 def update_med_tab_title():
     base = "Медицина"
@@ -177,81 +247,248 @@ def open_medical(aid):
         notified_animals.remove(aid)
         update_med_tab_title()
         refresh_med_list()
-
-    # останавливаем любое мигание строки списка
-    stop_list_blink()
+        stop_list_blink()
 
     # Очищаем detail_frame
     for w in detail_frame.winfo_children():
         w.destroy()
 
-    # Заголовок
-    ttk.Label(detail_frame, text=f"Медкарта животного #{aid}", font=("", 14)) \
-        .grid(row=0, column=0, sticky='w', pady=(0,10))
+    # 3. Адаптивный заголовок с корректным начальным размером
+    name = database.get_animal_by_id(aid)[1]
+    label_text = f"Медкарта животного #{aid} ({name})"
+
+    style = ttk.Style()
+    style.configure("Wrap.TLabel", justify="left")
+
+    header_label = ttk.Label(
+        detail_frame,
+        text=label_text,
+        font=("", 14),
+        style="Wrap.TLabel",
+        anchor="w",
+        wraplength=400  # Начальное примерное значение
+    )
+
+    header_label.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 5))
+
+    # Функция для обновления переноса
+    def update_wrap(event):
+        # Берем ширину фрейма минус отступы (20px)
+        new_width = detail_frame.winfo_width() - 20
+        # Устанавливаем минимальную ширину 100px для избежания "спагетти-текста"
+        header_label.configure(wraplength=max(100, new_width))
+
+    # Вызываем сразу после создания, чтобы установить начальное значение
+    header_label.update_idletasks()  # Ждем отрисовки
+    update_wrap(None)  # Инициализация
+
+    # Привязываем к изменению размера
+    detail_frame.bind("<Configure>", update_wrap)
+
+    # 4. Создаём Canvas+Scrollbar для всего контента
+    canvas = tk.Canvas(detail_frame, borderwidth=0)
+    vsb = ttk.Scrollbar(detail_frame, orient="vertical", command=canvas.yview)
+    scroll_frame = ttk.Frame(canvas)
+
+    # Фикс для правильного изменения размера
+    def _on_frame_configure(e):
+        # Обновляем привязку области прокрутки
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        # Принудительно устанавливаем ширину фрейма равной ширине canvas
+        canvas.itemconfig('all', width=e.width)
+
+    # Настройка расширения содержимого
+    detail_frame.rowconfigure(1, weight=1)
+    detail_frame.columnconfigure(0, weight=1)
+    canvas.columnconfigure(0, weight=1)
+    scroll_frame.columnconfigure(0, weight=1)  # Добавляем расширение для scroll_frame
+
+    # Привязка событий
+    scroll_frame.bind("<Configure>", _on_frame_configure)
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig("all", width=e.width))
+
+    # Встраиваем scroll_frame в canvas
+    canvas.create_window((0, 0), window=scroll_frame, anchor="nw", tags="all")
+    canvas.configure(yscrollcommand=vsb.set)
+
+    # Размещение элементов
+    canvas.grid(row=1, column=0, sticky='nsew')
+    vsb.grid(row=1, column=1, sticky='ns')
+
+    # 5. Заполняем scroll_frame по порядку:
 
     # --- Документы ---
-    docs = glob.glob(f"docs/{aid}/*")
-    docs_frame = ttk.LabelFrame(detail_frame, text="Документы")
-    docs_frame.grid(row=1, column=0, sticky='ew', pady=5)
-    for i, path in enumerate(docs):
-        fn = os.path.basename(path)
-        btn = ttk.Button(docs_frame, text=fn,
-                         command=lambda p=path: os.startfile(p))
-        btn.grid(row=i, column=0, sticky='w', pady=1)
+    docs = sorted(glob.glob(f"docs/{aid}/*"), key=os.path.getctime)
+    docs_frame = ttk.LabelFrame(scroll_frame, text="Документы")
+    docs_frame.grid(row=0, column=0, sticky='nsew', pady=(0, 5), padx=2)
+    docs_frame.columnconfigure(0, weight=1)
 
-    # --- Карантин и заметки ---
-    qd, notes = database.get_medical(aid)
-    med_frame = ttk.LabelFrame(detail_frame, text="Карантин и заметки")
-    med_frame.grid(row=2, column=0, sticky='ew', pady=5)
-    med_frame.columnconfigure(1, weight=1)
+    # Добавляем глобальную переменную для контроля обновлений
+    global update_lock
+    update_lock = False
 
-    ttk.Label(med_frame, text="Отсижено дней:").grid(row=0, column=0, sticky='w')
-    ent_qd = ttk.Entry(med_frame, width=10)
-    ent_qd.grid(row=0, column=1, sticky='w')
-    ent_qd.insert(0, str(qd))
+    def update_doc_buttons(event=None):
+        global update_lock
+        if update_lock:
+            return
+        
+        try:
+            update_lock = True
+            frame_width = docs_frame.winfo_width()
+            
+            # Удаляем старые виджеты
+            for w in docs_frame.winfo_children():
+                w.destroy()
+            
+            if not docs:
+                def open_docs_folder(aid):
+                    # Создаем путь к папке и гарантируем её существование
+                    folder_path = os.path.abspath(os.path.join("docs", str(aid)))
+                    os.makedirs(folder_path, exist_ok=True)
+                    
+                    # Открываем папку в проводнике (работает на Windows)
+                    if os.name == 'nt':  # Для Windows
+                        os.startfile(folder_path)
+                    else:  # Для MacOS/Linux (может потребовать настройки)
+                        os.system(f'open "{folder_path}"' if sys.platform == 'darwin' else f'xdg-open "{folder_path}"')
 
-    ttk.Label(med_frame, text="Наблюдения:").grid(row=1, column=0, sticky='nw', pady=(5,0))
-    txt_notes = tk.Text(med_frame, height=4)
-    txt_notes.grid(row=1, column=1, sticky='ew', pady=(5,0))
-    txt_notes.insert('1.0', notes)
+                # В вашем коде кнопки:
+                btn = tk.Button(
+                    docs_frame,
+                    text="Документов нет, нажмите чтобы добавить",
+                    bg="red", 
+                    fg="white",
+                    command=lambda: open_docs_folder(aid)  # Передаем актуальный aid
+                )
+                btn.grid(row=0, column=0, sticky='ew', padx=2, pady=2)
+                return
+            
+            # Рассчитываем размеры
+            temp_frame = ttk.Frame(docs_frame)
+            temp_buttons = []
+            for path in docs:
+                btn = ttk.Button(temp_frame, text=os.path.basename(path))
+                btn.grid()
+                temp_frame.update_idletasks()
+                temp_buttons.append(btn.winfo_width() + 10)
+                btn.destroy()
+            
+            max_width = max(temp_buttons) if temp_buttons else 1
+            columns = max(1, (frame_width - 20) // max_width)
+            
+            # Размещаем кнопки
+            row = col = 0
+            for i, path in enumerate(docs):
+                if col >= columns:
+                    row += 1
+                    col = 0
+                
+                btn = ttk.Button(
+                    docs_frame,
+                    text=os.path.basename(path),
+                    command=lambda p=path: os.startfile(p)
+                )
+                btn.grid(row=row, column=col, padx=2, pady=2, sticky='ew')
+                col += 1
+            
+            # Настройка колонок
+            for c in range(columns):
+                docs_frame.columnconfigure(c, weight=1)
+        
+        finally:
+            update_lock = False
 
-    ttk.Button(med_frame, text="Сохранить",
-        command=lambda: (
-            database.upsert_medical(aid, int(ent_qd.get()), txt_notes.get('1.0','end').strip()),
-            refresh_med_list()
-        )
-    ).grid(row=2, column=0, columnspan=2, pady=5)
+    # Первый вызов
+    update_doc_buttons()
 
-    # --- Процедуры ---
-    proc_frame = ttk.LabelFrame(detail_frame, text="Процедуры")
-    proc_frame.grid(row=3, column=0, sticky='nsew', pady=5)
-    proc_frame.columnconfigure(0, weight=1)
-    proc_frame.rowconfigure(0, weight=1)
+    # Оптимизированная привязка с троттлингом
+    def delayed_update(event):
+        docs_frame.after(100, update_doc_buttons)
 
-    tree_proc = ttk.Treeview(proc_frame,
-        columns=("Тип","Назначено","Статус"), show='headings')
-    for c in ("Тип","Назначено","Статус"):
-        tree_proc.heading(c, text=c)
-        tree_proc.column(c, anchor='center')
-    vsb = ttk.Scrollbar(proc_frame, orient='vertical', command=tree_proc.yview)
-    tree_proc.configure(yscrollcommand=vsb.set)
-    tree_proc.grid(row=0, column=0, sticky='nsew')
-    vsb.grid(row=0, column=1, sticky='ns')
+    docs_frame.bind("<Configure>", delayed_update)
 
-    def load_procs():
-        for r in tree_proc.get_children():
-            tree_proc.delete(r)
-        for pid, typ, sched, done, done_at, result in database.get_procedures(aid):
-            status = done and f"✓ {done_at}" or f"→ {sched}"
-            tree_proc.insert('', 'end', iid=str(pid), values=(typ, sched, status))
+    btn_new_event = ttk.Button(
+        scroll_frame,
+        text="Добавить событие",
+        command=lambda: open_event_dialog(aid, lambda: open_medical(aid))
+    )
+    btn_new_event.grid(row=3, column=0, sticky='w', pady=(0,10))
 
-    load_procs()
+        # === Блок «События» ===
+    # получаем список событий из БД
+    # ожидается формат: [(type, date_start, date_end_or_None, conclusion, [doc_paths], results_str_or_None), ...]
+    events = database.get_animal_events(aid)
 
-    btn_new = ttk.Button(proc_frame, text="Новая …", command=lambda: schedule_dialog(aid, load_procs))
-    btn_new.grid(row=1, column=0, sticky='w', pady=5)
-    btn_done = ttk.Button(proc_frame, text="Отметить выполненной",
-        command=lambda: complete_dialog(tree_proc, load_procs))
-    btn_done.grid(row=1, column=1, sticky='w', pady=5)
+    # Заголовок блока
+    ttk.Label(scroll_frame, text="События", font=("", 12)).grid(
+        row=2, column=0, sticky='w', pady=(10, 5)
+    )
+
+    # Canvas для горизонтальной прокрутки
+    events_canvas = tk.Canvas(scroll_frame, height=2000, borderwidth=0)
+    hsb = ttk.Scrollbar(scroll_frame, orient="horizontal", command=events_canvas.xview)
+    events_frame = ttk.Frame(events_canvas)
+
+    events_frame.bind(
+        "<Configure>",
+        lambda e: events_canvas.configure(scrollregion=events_canvas.bbox("all"))
+    )
+    events_canvas.create_window((0, 0), window=events_frame, anchor="nw")
+    events_canvas.configure(xscrollcommand=hsb.set)
+
+    events_canvas.grid(row=5, column=0, sticky='ew')
+    hsb.grid(row=4, column=0, sticky='ew')
+    COL_W = 1000
+    PAD_X = 5
+
+    # Наполняем
+    for idx, (etype, ds, de, concl, doc_list, results, eid) in enumerate(events):
+        col = ttk.Frame(events_frame, width=COL_W, relief='groove', padding=5)
+        col.grid(row=0, column=idx, padx=(0 if idx==0 else PAD_X, 0), sticky='n')
+
+        def attach_event_doc(event_id=eid):
+            path = filedialog.askopenfilename(title="Выберите документ")
+            if not path:
+                return
+            dest_dir = os.path.join("docs", str(aid))
+            os.makedirs(dest_dir, exist_ok=True)
+            fn = f"{event_id}_{os.path.basename(path)}"
+            shutil.copy(path, os.path.join(dest_dir, fn))
+            open_medical(aid)  # перерисуем карточку
+
+        # 1) Тип события
+        ttk.Label(col, text=etype, font=("", 10, "bold")).pack(anchor='w', pady=(0,4))
+
+        # 2) Даты
+        date_text = ds if not de or ds==de else f"{ds} — {de}"
+        ttk.Label(col, text=date_text).pack(anchor='w', pady=(0,4))
+
+        # 3) Профзаключение
+        ttk.Label(col, text="Заключение:", font=("", 9, "underline")).pack(anchor='w')
+        ttk.Label(col, text=concl or "—", wraplength=COL_W-10).pack(anchor='w', pady=(0,4))
+
+        # 4) Документы
+        ttk.Label(col, text="Документы:", font=("", 9, "underline")).pack(anchor='w', pady=(4,0))
+        if doc_list:
+            for p in doc_list:
+                fn = os.path.basename(p)
+                btn = ttk.Button(col, text=fn, command=lambda p=p: os.startfile(p))
+                btn.pack(anchor='w', pady=1)
+            ttk.Button(col, text="Прикрепить документ…", command=attach_event_doc) \
+                .pack(anchor='w', pady=2)
+        else:
+            tk.Button(
+                col, text="Документов нет, прикрепить…",
+                bg="red", fg="white",
+                command=attach_event_doc
+            ).pack(anchor='w', pady=5)
+
+        # 5) Результаты (если есть)
+        ttk.Label(col, text="Результаты:", font=("", 9, "underline")).pack(anchor='w', pady=(4,0))
+        if results:
+            ttk.Label(col, text=results, wraplength=COL_W-10).pack(anchor='w')
+        else:
+            ttk.Label(col, text="—").pack(anchor='w')
 
 
 def refresh_med_list():
@@ -708,9 +945,10 @@ for x in range(12):
 tab_med = ttk.Frame(notebook)
 notebook.add(tab_med, text="Медицина", image=_blank_img, compound='right')
 
-# растягиваем колонки и строку
-tab_med.columnconfigure(0, weight=1)
-tab_med.columnconfigure(1, weight=3)
+# сетка: левая колонка фиксированной ширины, правая растягивается
+tab_med.columnconfigure(0, weight=0)   # колонка списка — фиксированная
+tab_med.columnconfigure(1, weight=1)   # колонка карточки — растягивается
+tab_med.rowconfigure(0, weight=0)
 tab_med.rowconfigure(1, weight=1)
 
 # Заголовок над списком
@@ -731,14 +969,13 @@ lst_med.configure(yscrollcommand=vsb_med.set)
 lst_med.grid(row=0, column=0, sticky='nsew')
 vsb_med.grid(row=0, column=1, sticky='ns')
 
-# панель деталей
-detail_frame = ttk.Frame(tab_med, relief='sunken', padding=5)
+# === Панель деталей (медкарта), создаётся пустой и будет переопределяться при открытии карточки ===
+detail_frame = ttk.Frame(tab_med)
 detail_frame.grid(row=1, column=1, sticky='nsew', padx=5, pady=5)
 detail_frame.columnconfigure(0, weight=1)
 
 med_names = []  # будет хранить полные имена по индексам
 
-# функция автоподгона ширины (1/4 вкладки)
 med_font = font.nametofont(lst_med.cget("font"))
 def adjust_med_list_width(event=None):
     # 1) меряем, сколько пикселей можем занять
@@ -752,6 +989,7 @@ def adjust_med_list_width(event=None):
 
     # 3) перерисовываем сам список с новыми ограничениями
     refresh_med_list()
+
 
 # === Tab “Приют” ===
 # 1) Настройка сетки
