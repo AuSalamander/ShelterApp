@@ -2,15 +2,34 @@ import sqlite3
 
 DB_NAME = 'shelter.db'
 
-def init_db():
+def update_adoption_field(adoption_id, field, value):
     """
-    Создаёт (при необходимости) таблицы animals и adoptions.
+    Обновляет одно из полей в таблице adoptions:
+      owner_name, owner_contact или adoption_date
     """
-    # 1) Открываем соединение и получаем курсор
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # 2) Создаём таблицу животных
+    # Список разрешённых полей
+    if field not in ("owner_name", "owner_contact", "adoption_date"):
+        conn.close()
+        raise ValueError(f"Недопустимое поле для обновления: {field}")
+
+    cur.execute(
+        f'UPDATE adoptions SET {field} = ? WHERE id = ?',
+        (value, adoption_id)
+    )
+    conn.commit()
+    conn.close()
+
+def init_db():
+    """
+    Создаёт, если надо, все таблицы: animals, adoptions, medical, procedures.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+
+    # --- animals ---
     cur.execute('''
         CREATE TABLE IF NOT EXISTS animals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,7 +43,7 @@ def init_db():
         )
     ''')
 
-    # 3) Создаём таблицу приёмов (adoptions) со snapshot полей животного
+    # --- adoptions ---
     cur.execute('''
         CREATE TABLE IF NOT EXISTS adoptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +60,28 @@ def init_db():
         )
     ''')
 
-    # 4) Фиксируем изменения и закрываем соединение
+    # --- medical ---
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS medical (
+            animal_id       INTEGER PRIMARY KEY,
+            quarantine_days INTEGER DEFAULT 0,
+            notes           TEXT DEFAULT ''
+        )
+    ''')
+
+    # --- procedures ---
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS procedures (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            animal_id    INTEGER,
+            type         TEXT,
+            scheduled    TEXT,
+            completed    INTEGER,
+            completed_at TEXT,
+            result       TEXT
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -124,9 +164,6 @@ def get_all_cage_numbers():
 
 def add_animal(name, species, birth_date, age_estimated,
                arrival_date, cage_number, quarantine_until):
-    """
-    Добавляет животное с указанием клетки и срока карантина.
-    """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute('''
@@ -137,7 +174,9 @@ def add_animal(name, species, birth_date, age_estimated,
     ''', (name, species, birth_date, age_estimated,
           arrival_date, cage_number, quarantine_until))
     conn.commit()
+    new_id = cur.lastrowid
     conn.close()
+    return new_id
 
 
 def delete_animal(animal_id):
@@ -156,6 +195,65 @@ def update_animal_field(animal_id, field, value):
     conn.commit()
     conn.close()
 
+def get_all_animals_ids():
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM animals")
+    out = cur.fetchall()
+    conn.close()
+    return out  # list of (id, name)
 
+def get_medical(animal_id):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("SELECT quarantine_days, notes FROM medical WHERE animal_id=?", (animal_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row or (0, '')
+
+def upsert_medical(animal_id, quarantine_days, notes):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+      INSERT INTO medical(animal_id, quarantine_days, notes)
+        VALUES (?, ?, ?)
+      ON CONFLICT(animal_id) DO UPDATE
+        SET quarantine_days=?, notes=?
+    ''', (animal_id, quarantine_days, notes, quarantine_days, notes))
+    conn.commit()
+    conn.close()
+
+def get_procedures(animal_id):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+      SELECT id, type, scheduled, completed, completed_at, result
+      FROM procedures WHERE animal_id=?
+      ORDER BY scheduled
+    ''', (animal_id,))
+    out = cur.fetchall()
+    conn.close()
+    return out
+
+def schedule_procedure(animal_id, type_, scheduled_iso):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+      INSERT INTO procedures(animal_id,type,scheduled,completed)
+      VALUES (?,?,?,0)
+    ''', (animal_id, type_, scheduled_iso))
+    conn.commit()
+    conn.close()
+
+def complete_procedure(proc_id, completed_at_iso, result_text):
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+      UPDATE procedures
+      SET completed=1, completed_at=?, result=?
+      WHERE id=?
+    ''', (completed_at_iso, result_text, proc_id))
+    conn.commit()
+    conn.close()
 
 

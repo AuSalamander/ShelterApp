@@ -1,0 +1,2 @@
+initial_exam_delay_seconds=1800 # 30 минут до больницы
+followup_delay_seconds=4200  # час и 10 минут до возвращения

@@ -1,8 +1,14 @@
+import configparser
 import tkinter as tk
 from tkinter import ttk, messagebox, font
 import database  # файл database.py
 from datetime import date, timedelta
 import re 
+import tkinter.simpledialog as sd
+import os
+import glob
+
+database.init_db()
 
 # номер колонки в Treeview → имя поля в БД
 COLUMN_MAP = {
@@ -13,15 +19,271 @@ COLUMN_MAP = {
     "#7": "cage_number",         # колонка «Клетка»
     "#8": "quarantine_until",    # колонка «Осталось дней карантина»
 }
-# Инициализация БД
-import database
-database.init_db()
 
 # Переменные
+notified_animals = set()
+blink_list_timer = None
+blink_list_state = False
+blink_index = None
 blink_timers = {}
 fullscreen = False
+species_map = {}
+cfg = configparser.ConfigParser(allow_no_value=True)
+cfg.optionxform = str  # чтобы имена сохранили регистр
+cfg.read('spesies_config.txt', encoding='utf-8')
+for section in cfg.sections():
+    # у нас в секции нет ключ=значение, а просто строки
+    breeds = [k for k in cfg[section].keys()]
+    species_map[section] = breeds
+today = date.today()
+cfg = {}
+with open("cfg.txt", encoding="utf-8") as f:
+    for raw in f:
+        line = raw.split('#', 1)[0].strip()  # отсекаем всё после #
+        if not line or '=' not in line:
+            continue
+        key, val = line.split('=', 1)
+        try:
+            cfg[key.strip()] = int(val.strip())
+        except ValueError:
+            # если не число — можно хранить как строку или пропускать
+            cfg[key.strip()] = val.strip()
+tip = None
 
 # Функции действий
+
+def update_med_tab_title():
+    base = "Медицина"
+    if notified_animals:
+        notebook.tab(tab_med,
+                     text=base,
+                     image=_yellow_dot,
+                     compound='right')
+    else:
+        notebook.tab(tab_med,
+                     text=base,
+                     image=_blank_img,
+                     compound='right')
+
+def blink_list_item(index):
+    global blink_list_timer, blink_list_state, blink_index
+    # отменяем старое мигание
+    if blink_list_timer is not None:
+        root.after_cancel(blink_list_timer)
+        # сбросим предыдущую строку
+        if blink_index is not None:
+            lst_med.itemconfig(blink_index, bg='')
+    blink_index = index
+    blink_list_state = False
+
+    def _blink():
+        global blink_list_state, blink_list_timer
+        # чередуем bg и пустой
+        color = 'yellow' if blink_list_state else ''
+        lst_med.itemconfig(blink_index, bg=color)
+        blink_list_state = not blink_list_state
+        blink_list_timer = root.after(250, _blink)
+
+    _blink()
+
+def stop_list_blink():
+    global blink_list_timer, blink_index
+    if blink_list_timer is not None:
+        root.after_cancel(blink_list_timer)
+        blink_list_timer = None
+    if blink_index is not None:
+        lst_med.itemconfig(blink_index, bg='')
+        blink_index = None
+
+def on_med_select(event):
+    sel = lst_med.curselection()
+    if not sel:
+        return
+    text = lst_med.get(sel[0])
+    # ожидаем формат "ID:<число>: <имя>"
+    parts = text.split(":", 2)
+    if len(parts) < 3:
+        return
+    id_part = parts[1].strip()
+    if not id_part.isdigit():
+        return
+    aid = int(id_part)
+    open_medical(aid)
+
+
+
+# минимальный тултип для Listbox
+tip = None
+def on_motion(event):
+    global tip
+    # получаем индекс ближайшего элемента
+    idx = lst_med.nearest(event.y)
+    # bbox = (x, y, width, height) или () если элемент не виден
+    bbox = lst_med.bbox(idx)
+    # если нет bbox или курсор не внутри области bbox — скрываем тултип
+    if not bbox:
+        if tip:
+            tip.destroy()
+            tip = None
+        return
+    x0, y0, w0, h0 = bbox
+    # проверяем, что event.y действительно в пределах этой строки
+    if event.y < y0 or event.y > y0 + h0:
+        if tip:
+            tip.destroy()
+            tip = None
+        return
+
+    # теперь можно показывать тултип
+    full = med_names[idx]
+    if tip:
+        tip.destroy()
+    tip = tk.Toplevel(lst_med)
+    tip.wm_overrideredirect(True)
+    # позиционируем рядом с элементом
+    abs_x = lst_med.winfo_rootx() + w0 + 2
+    abs_y = lst_med.winfo_rooty() + y0
+    tip.geometry(f"+{abs_x}+{abs_y}")
+    tk.Label(tip, text=full, background="lightyellow").pack()
+
+def on_leave(event):
+    global tip
+    if tip:
+        tip.destroy()
+        tip = None
+
+def schedule_dialog(aid, refresh_cb):
+    d = sd.askstring("Назначить процедуру", "Тип,дата(YYYY-MM-DD):")
+    if not d: return
+    typ, dt = map(str.strip, d.split(",",1))
+    database.schedule_procedure(aid, typ, dt)
+    refresh_cb()
+
+def complete_dialog(tree, refresh_cb):
+    sel = tree.selection()
+    if not sel: return
+    pid = int(sel[0])
+    res = sd.askstring("Результат", "Введите результат:")
+    if not res: return
+    completed_at = date.today().isoformat()
+    database.complete_procedure(pid, completed_at, res)
+    refresh_cb()
+
+def open_medical(aid):
+    # Переключаемся на вкладку «Медицина»
+    notebook.select(tab_med)
+
+    if aid in notified_animals:
+        notified_animals.remove(aid)
+        update_med_tab_title()
+        refresh_med_list()
+
+    # останавливаем любое мигание строки списка
+    stop_list_blink()
+
+    # Очищаем detail_frame
+    for w in detail_frame.winfo_children():
+        w.destroy()
+
+    # Заголовок
+    ttk.Label(detail_frame, text=f"Медкарта животного #{aid}", font=("", 14)) \
+        .grid(row=0, column=0, sticky='w', pady=(0,10))
+
+    # --- Документы ---
+    docs = glob.glob(f"docs/{aid}/*")
+    docs_frame = ttk.LabelFrame(detail_frame, text="Документы")
+    docs_frame.grid(row=1, column=0, sticky='ew', pady=5)
+    for i, path in enumerate(docs):
+        fn = os.path.basename(path)
+        btn = ttk.Button(docs_frame, text=fn,
+                         command=lambda p=path: os.startfile(p))
+        btn.grid(row=i, column=0, sticky='w', pady=1)
+
+    # --- Карантин и заметки ---
+    qd, notes = database.get_medical(aid)
+    med_frame = ttk.LabelFrame(detail_frame, text="Карантин и заметки")
+    med_frame.grid(row=2, column=0, sticky='ew', pady=5)
+    med_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(med_frame, text="Отсижено дней:").grid(row=0, column=0, sticky='w')
+    ent_qd = ttk.Entry(med_frame, width=10)
+    ent_qd.grid(row=0, column=1, sticky='w')
+    ent_qd.insert(0, str(qd))
+
+    ttk.Label(med_frame, text="Наблюдения:").grid(row=1, column=0, sticky='nw', pady=(5,0))
+    txt_notes = tk.Text(med_frame, height=4)
+    txt_notes.grid(row=1, column=1, sticky='ew', pady=(5,0))
+    txt_notes.insert('1.0', notes)
+
+    ttk.Button(med_frame, text="Сохранить",
+        command=lambda: (
+            database.upsert_medical(aid, int(ent_qd.get()), txt_notes.get('1.0','end').strip()),
+            refresh_med_list()
+        )
+    ).grid(row=2, column=0, columnspan=2, pady=5)
+
+    # --- Процедуры ---
+    proc_frame = ttk.LabelFrame(detail_frame, text="Процедуры")
+    proc_frame.grid(row=3, column=0, sticky='nsew', pady=5)
+    proc_frame.columnconfigure(0, weight=1)
+    proc_frame.rowconfigure(0, weight=1)
+
+    tree_proc = ttk.Treeview(proc_frame,
+        columns=("Тип","Назначено","Статус"), show='headings')
+    for c in ("Тип","Назначено","Статус"):
+        tree_proc.heading(c, text=c)
+        tree_proc.column(c, anchor='center')
+    vsb = ttk.Scrollbar(proc_frame, orient='vertical', command=tree_proc.yview)
+    tree_proc.configure(yscrollcommand=vsb.set)
+    tree_proc.grid(row=0, column=0, sticky='nsew')
+    vsb.grid(row=0, column=1, sticky='ns')
+
+    def load_procs():
+        for r in tree_proc.get_children():
+            tree_proc.delete(r)
+        for pid, typ, sched, done, done_at, result in database.get_procedures(aid):
+            status = done and f"✓ {done_at}" or f"→ {sched}"
+            tree_proc.insert('', 'end', iid=str(pid), values=(typ, sched, status))
+
+    load_procs()
+
+    btn_new = ttk.Button(proc_frame, text="Новая …", command=lambda: schedule_dialog(aid, load_procs))
+    btn_new.grid(row=1, column=0, sticky='w', pady=5)
+    btn_done = ttk.Button(proc_frame, text="Отметить выполненной",
+        command=lambda: complete_dialog(tree_proc, load_procs))
+    btn_done.grid(row=1, column=1, sticky='w', pady=5)
+
+
+def refresh_med_list():
+    lst_med.delete(0, 'end')
+    med_names.clear()
+
+    # пересчитаем доступную ширину в пикселях
+    list_frame.update_idletasks()
+    frame_px = list_frame.winfo_width()
+    pad_px = vsb_med.winfo_reqwidth() + 6
+    avail_px = max(50, frame_px - pad_px)
+
+    for aid, name in database.get_all_animals_ids():
+        full = f"ID:{aid}: {name}"
+        # если текст целиком помещается — используем его
+        if med_font.measure(full) <= avail_px:
+            display = full
+        else:
+            # бинарный поиск максимальной длины подстроки, влезает ли вместе с '...'
+            lo, hi = 0, len(full)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if med_font.measure(full[:mid] + '...') <= avail_px:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            # lo — первая неподходящая длина, поэтому обрезаем на lo-1
+            display = full[:lo-1] + '...'
+
+        lst_med.insert('end', display)
+        med_names.append(full)
+
 
 def autofit_columns(tree, columns, padding=10):
     """
@@ -108,36 +370,35 @@ def subtract_months(today: date, months: int) -> date:
     return date(year, month, day)
 
 def on_tree_click(event):
-    # только ячейки
+    # 1) Обрабатываем только клики по ячейкам
     if tree.identify("region", event.x, event.y) != "cell":
         return
 
-    # выясняем, на какую колонку кликнули
-    col_id = tree.identify_column(event.x)      # строка вида "#1", "#2", ...
+    # 2) Определяем, в какой колонке и строке клик
+    col_id = tree.identify_column(event.x)       # "#1", "#2", ...
     col_index = int(col_id.replace("#", "")) - 1
-    col_name = tree["columns"][col_index]        # имя колонки из columns = (...)
+    col_name = tree["columns"][col_index]         # имя колонки
+    row_id = tree.identify_row(event.y)           # iid строки
+    if not row_id:
+        return
+    animal_id = int(tree.item(row_id)["values"][0])
 
-    # если это колонка «Del» — удаляем
+    # 3) Ветка «Med» (новая медицинская страница)
+    if col_name == "Med":
+        open_medical(animal_id)
+        return
+
+    # 4) Ветка «Adopt»
+    if col_name == "Adopt":
+        open_adopt_dialog(animal_id)
+        return
+
+    # 5) Ветка «Del»
     if col_name == "Del":
-        row_id = tree.identify_row(event.y)
-        if not row_id:
-            return
-        animal_id = tree.item(row_id)["values"][0]
         if messagebox.askyesno("Подтверждение", f"Удалить ID {animal_id}?"):
             database.delete_animal(animal_id)
             refresh_list()
-        re
-
-    # Приём животного
-    if col_name == "Adopt":
-        row_id = tree.identify_row(event.y)
-    if not row_id:
         return
-    animal_id = tree.item(row_id)["values"][0]
-    open_adopt_dialog(animal_id)
-    return
-
-
 
 def on_double_click(event):
     # Обрабатываем только клики по ячейкам
@@ -197,15 +458,59 @@ def on_double_click(event):
     entry.bind("<Return>", save_edit)
     entry.bind("<FocusOut>", save_edit)
 
+def on_adopted_double_click(event):
+    if tree_adopted.identify("region", event.x, event.y) != "cell":
+        return
+    col_id = tree_adopted.identify_column(event.x)
+    field = COLUMN_MAP_ADOPTED.get(col_id)
+    if not field:
+        return  # эту колонку не редактируем
+
+    row_id = tree_adopted.identify_row(event.y)
+    if not row_id:
+        return
+
+    # вот здесь заменили:
+    adoption_id = int(row_id)
+
+    x, y, width, height = tree_adopted.bbox(row_id, col_id)
+    old_value = tree_adopted.set(row_id, col_id)
+    entry = tk.Entry(tree_adopted)
+    entry.place(x=x, y=y, width=width, height=height)
+    entry.insert(0, old_value)
+    entry.focus()
+
+    def save_edit(e):
+        new_value = entry.get().strip()
+        # валидация даты передачи
+        if field == "adoption_date":
+            try:
+                date.fromisoformat(new_value)
+            except ValueError:
+                messagebox.showwarning("Ошибка", "Неверный формат даты")
+                entry.focus()
+                return
+
+        database.update_adoption_field(adoption_id, field, new_value)
+        entry.destroy()
+        refresh_adopted_list()
+
+    entry.bind("<Return>", save_edit)
+    entry.bind("<FocusOut>", save_edit)
 
 def add():
     name = entry_name.get().strip()
-    species = entry_species.get().strip()
+    selected_species = combobox_species.get().strip()
+    breed   = combobox_breed.get().strip()
     bd = entry_birth.get().strip()
     est = entry_est.get().strip()
     arrival = entry_arrival.get().strip() or date.today().isoformat()
     cage = entry_cage.get().strip()
     quarantine_until = entry_quarantine.get().strip()
+    if not selected_species:
+        messagebox.showwarning("Ошибка", "Выберите вид"); return
+    # Собираем «вид / порода»
+    species = f"{selected_species} / {breed}" if breed else species
 
     if not name:
         messagebox.showwarning("Ошибка", "Имя обязательно")
@@ -249,18 +554,40 @@ def add():
         messagebox.showwarning("Ошибка", "Неправильный формат даты окончания карантина")
         return
     
-    database.add_animal(
-        name,
-        species,
-        bdate.isoformat(),
-        est_flag,
-        arrival,
-        cage,
-        qdate.isoformat()
+    # Сохраняем в базу и получаем новый ID
+    new_id = database.add_animal(
+    name,
+    species,
+    bdate.isoformat(),
+    est_flag,
+    arrival,
+    cage,
+    quarantine_until
     )
-    messagebox.showinfo("Готово", "Животное добавлено")
-    refresh_list()
 
+    # создаём папку для документов
+    os.makedirs(f"docs/{new_id}", exist_ok=True)
+
+    messagebox.showinfo("Готово", f"Животное добавлено с ID {new_id}")
+
+    # Обновляем обе таблицы и список медицины
+    refresh_list()
+    refresh_adopted_list()
+
+    # Маркируем его «новым»
+    notified_animals.add(new_id)
+    # Перерисовываем заголовок вкладки и список
+    update_med_tab_title()
+    refresh_med_list()
+
+    # запускаем мигание только что добавленной строки
+    full_name = f"ID:{new_id}: {name}"
+    # ищем индекс в med_names
+    try:
+        idx = med_names.index(full_name)
+        blink_list_item(idx)
+    except ValueError:
+        pass
 
 def refresh_list():
     # Останавливаем все текущие мигания
@@ -272,7 +599,7 @@ def refresh_list():
     tree.delete(*tree.get_children())
 
     today = date.today()
-    for (id_, name, species, bd, est_flag,
+    for (id_, name, full_species, bd, est_flag,
          arr, cage, quarantine_until) in database.get_all_animals():
 
         # возраст
@@ -296,19 +623,19 @@ def refresh_list():
                 tags = ('expired',)
         
         values = (
-            id_, name, species,
+            id_, name, full_species,
             bd_disp, age_disp,
             arr or "",
-            cage, days_left, "🤝", "🗑"
+            cage, days_left,"📋", "🤝", "🗑"
         )
         item = tree.insert(
             '',
             'end',
             values=(
-                id_, name, species,
+                id_, name, full_species,
                 bd_disp, age_disp,
                 arr,
-                cage, days_left,
+                cage, days_left,"📋",
                 "🤝",   # иконка для приёма
                 "🗑"
             ),
@@ -353,7 +680,7 @@ def get_default_quarantine_cage():
 # === Главное окно ===
 root = tk.Tk()
 root.title("Приют: учёт животных")
-root.geometry("900x600")
+root.geometry("1000x750")
 root.columnconfigure(0, weight=1)
 root.rowconfigure(0, weight=1)
 
@@ -366,6 +693,65 @@ notebook.add(tab_adopted, text="Переданы")
 notebook.grid(row=0, column=0, sticky="nsew")
 root.rowconfigure(0, weight=1)
 root.columnconfigure(0, weight=1)
+
+# создаём два изображения: пустое и жёлтое кружочко
+_blank_img = tk.PhotoImage(width=1, height=1)
+
+_yellow_dot = tk.PhotoImage(width=12, height=12)
+# рисуем закрашенный круг радиусом 5px
+for x in range(12):
+    for y in range(12):
+        if (x-6)**2 + (y-6)**2 <= 6**2:
+            _yellow_dot.put("#FFD700", (x, y))  # золотистый
+
+# === Tab “Медицина” ===
+tab_med = ttk.Frame(notebook)
+notebook.add(tab_med, text="Медицина", image=_blank_img, compound='right')
+
+# растягиваем колонки и строку
+tab_med.columnconfigure(0, weight=1)
+tab_med.columnconfigure(1, weight=3)
+tab_med.rowconfigure(1, weight=1)
+
+# Заголовок над списком
+ttk.Label(tab_med,
+    text="Медкарта животного:"
+).grid(row=0, column=0, sticky='nw', padx=5, pady=(5,0))
+
+# Frame для списка + скроллбар
+list_frame = ttk.Frame(tab_med)
+list_frame.grid(row=1, column=0, sticky='nsw', padx=5, pady=5)
+list_frame.rowconfigure(0, weight=1)
+list_frame.columnconfigure(0, weight=1)
+
+lst_med = tk.Listbox(list_frame, activestyle='none')
+vsb_med = ttk.Scrollbar(list_frame, orient='vertical', command=lst_med.yview)
+lst_med.configure(yscrollcommand=vsb_med.set)
+
+lst_med.grid(row=0, column=0, sticky='nsew')
+vsb_med.grid(row=0, column=1, sticky='ns')
+
+# панель деталей
+detail_frame = ttk.Frame(tab_med, relief='sunken', padding=5)
+detail_frame.grid(row=1, column=1, sticky='nsew', padx=5, pady=5)
+detail_frame.columnconfigure(0, weight=1)
+
+med_names = []  # будет хранить полные имена по индексам
+
+# функция автоподгона ширины (1/4 вкладки)
+med_font = font.nametofont(lst_med.cget("font"))
+def adjust_med_list_width(event=None):
+    # 1) меряем, сколько пикселей можем занять
+    total = tab_med.winfo_width()
+    max_px = total // 4
+    min_px = med_font.measure('0') * 10
+    frame_px = max(min_px, max_px)
+
+    # 2) сразу выставляем ширину фрейма и списка
+    list_frame.config(width=frame_px)
+
+    # 3) перерисовываем сам список с новыми ограничениями
+    refresh_med_list()
 
 # === Tab “Приют” ===
 # 1) Настройка сетки
@@ -383,19 +769,32 @@ ttk.Label(frm_inputs, text="Имя").grid(row=0, column=0, sticky="w", pady=2)
 entry_name = ttk.Entry(frm_inputs); entry_name.grid(row=0, column=1, sticky="ew", pady=2)
 
 ttk.Label(frm_inputs, text="Вид").grid(row=1, column=0, sticky="w", pady=2)
-entry_species = ttk.Entry(frm_inputs); entry_species.grid(row=1, column=1, sticky="ew", pady=2)
+combobox_species = ttk.Combobox(
+    frm_inputs,
+    values=list(species_map.keys()),
+    state="readonly"
+)
+combobox_species.grid(row=1, column=1, sticky="ew", pady=2)
 
-ttk.Label(frm_inputs, text="Дата рождения\n(YYYY-MM-DD)").grid(row=2, column=0, sticky="w", pady=2)
-entry_birth = ttk.Entry(frm_inputs); entry_birth.grid(row=2, column=1, sticky="ew", pady=2)
+ttk.Label(frm_inputs, text="Порода").grid(row=2, column=0, sticky="w", pady=2)
+combobox_breed = ttk.Combobox(
+    frm_inputs,
+    values=[],
+    state="readonly"
+)
+combobox_breed.grid(row=2, column=1, sticky="ew", pady=2)
 
-ttk.Label(frm_inputs, text="ИЛИ оценка возраста\n(месяцы)").grid(row=3, column=0, sticky="w", pady=2)
-entry_est = ttk.Entry(frm_inputs); entry_est.grid(row=3, column=1, sticky="ew", pady=2)
+ttk.Label(frm_inputs, text="Дата рождения\n(YYYY-MM-DD)").grid(row=3, column=0, sticky="w", pady=2)
+entry_birth = ttk.Entry(frm_inputs); entry_birth.grid(row=3, column=1, sticky="ew", pady=2)
 
-ttk.Label(frm_inputs, text="Дата поступления\n(YYYY-MM-DD)").grid(row=4, column=0, sticky="w", pady=2)
-entry_arrival = ttk.Entry(frm_inputs); entry_arrival.grid(row=4, column=1, sticky="ew", pady=2)
+ttk.Label(frm_inputs, text="ИЛИ оценка возраста\n(месяцы)").grid(row=4, column=0, sticky="w", pady=2)
+entry_est = ttk.Entry(frm_inputs); entry_est.grid(row=4, column=1, sticky="ew", pady=2)
+
+ttk.Label(frm_inputs, text="Дата поступления\n(YYYY-MM-DD)").grid(row=5, column=0, sticky="w", pady=2)
+entry_arrival = ttk.Entry(frm_inputs); entry_arrival.grid(row=5, column=1, sticky="ew", pady=2)
 
 # 3) Фрейм “Клетка / Карантин”
-frm_quarantine = ttk.LabelFrame(tab_shelter, text="Клетка / Карантин")
+frm_quarantine = ttk.LabelFrame(tab_shelter, text="Карантин")
 frm_quarantine.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
 frm_quarantine.columnconfigure(0, weight=0)
 frm_quarantine.columnconfigure(1, weight=1)
@@ -424,7 +823,7 @@ columns = (
     "ID", "Имя", "Вид",
     "Дата рождения", "Возраст (мес.)",
     "Дата поступления",
-    "Клетка", "Осталось дней карантина",
+    "Клетка", "Осталось дней карантина","Med",
     "Adopt", "Del"
 )
 
@@ -435,26 +834,24 @@ table_frame.rowconfigure(0, weight=1)
 
 tree = ttk.Treeview(table_frame, columns=columns, show='headings')
 for col in columns:
-    tree.heading(col, text=col if col not in ("Adopt", "Del") else "")
+    tree.heading(col, text=col if col not in ("Med","Adopt", "Del") else "")
 # настраиваем ширины
 tree.column("ID", width=30, anchor='center')
 tree.column("Имя", width=100, anchor='w')
-tree.column("Вид", width=100, anchor='w')
+tree.column("Вид", width=150, anchor='w')
 tree.column("Дата рождения", width=100, anchor='center')
 tree.column("Возраст (мес.)", width=90, anchor='center')
 tree.column("Дата поступления", width=100, anchor='center')
 tree.column("Клетка", width=70, anchor='center')
 tree.column("Осталось дней карантина", width=150, anchor='center')
-tree.column("Adopt", width=30, anchor='center')
-tree.column("Del", width=30, anchor='center')
+tree.column("Med", width=20, anchor='center')
+tree.column("Adopt", width=20, anchor='center')
+tree.column("Del", width=20, anchor='center')
 
 vsb = ttk.Scrollbar(table_frame, orient='vertical', command=tree.yview)
 tree.configure(yscrollcommand=vsb.set)
 tree.grid(row=0, column=0, sticky='nsew')
 vsb.grid(row=0, column=1, sticky='ns')
-
-tree.bind("<Button-1>", on_tree_click)
-tree.bind("<Double-1>", on_double_click)
 
 # === Tab “Переданы” ===
 tab_adopted.columnconfigure(0, weight=1)
@@ -463,7 +860,7 @@ tab_adopted.grid_propagate(False)
 tab_adopted.rowconfigure(1, weight=1)
 tab_adopted.columnconfigure(0, weight=1)
 
-ttk.Label(tab_adopted, text="Сданные животные", font=("", 14)).grid(row=0, column=0, pady=5)
+ttk.Label(tab_adopted, text="Переданные животные", font=("", 14)).grid(row=0, column=0, pady=5)
 
 # Frame для таблицы (растягивается по ширине и высоте)
 frm_adopt = ttk.Frame(tab_adopted)
@@ -477,11 +874,26 @@ columns_adopted = (
     "Дата рождения", "Возраст (мес.)", "Дата поступления",
     "Имя владельца", "Контакт", "Дата передачи"
 )
+
+# сопоставляем col_id → имя поля в adoptions
+COLUMN_MAP_ADOPTED = {
+    "#1": None,               # "ID животного" — не редактируем
+    "#2": None,               # "Имя" — snapshot, можно не править
+    "#3": None,               # "Вид" — snapshot, не правим
+    "#4": None,               # "Дата рождения" — snapshot
+    "#5": None,               # "Возраст (мес.)" — snapshot
+    "#6": None,               # "Дата поступления" — snapshot
+    "#7": "owner_name",       # редактируем имя владельца
+    "#8": "owner_contact",    # редактируем контакт
+    "#9": "adoption_date",    # редактируем дату передачи
+}
+
 tree_adopted = ttk.Treeview(
     frm_adopt,
     columns=columns_adopted,
     show='headings'
 )
+
 # обычный вертикальный
 vsb2 = ttk.Scrollbar(frm_adopt, orient='vertical', command=tree_adopted.yview)
 tree_adopted.configure(yscrollcommand=vsb2.set)
@@ -502,34 +914,37 @@ for c in columns_adopted:
 
 def refresh_adopted_list():
     tree_adopted.delete(*tree_adopted.get_children())
-    today = date.today()
 
     for rec in database.get_all_adoptions():
-        # rec = (id, animal_id, name, species,
-        #        birth_date, age_estimated, arrival_date,
-        #        owner_name, owner_contact, adoption_date)
-        (_, animal_id, name, species, bd, est_flag,
+        # rec = (id, animal_id, name,...,owner,contact,ad_date)
+        (adopt_id, animal_id, name, species, bd, est_flag,
          arr, owner, contact, ad_date) = rec
 
-        # пересчитать возраст
         bdate = date.fromisoformat(bd)
         months = (today.year*12 + today.month) - (bdate.year*12 + bdate.month)
         age_disp = f"~{months}" if est_flag else str(months)
         bd_disp  = f"~{bd}" if est_flag else bd
         arr_disp = arr or ""
-
-        tree_adopted.insert('', 'end', values=(
+        values = (
             animal_id, name, species,
             bd_disp, age_disp, arr_disp,
             owner, contact, ad_date
-        ))
-
+        )
+        # сохраняем adopt_id в tags, чтобы потом знать, какую запись править
+        tree_adopted.insert(
+            '', 'end',
+            iid=str(adopt_id),   # или tags=[str(adopt_id)]
+            values=values
+        )
     autofit_columns(tree_adopted, columns_adopted)
 
-# === Инициализация и первый показ данных ===
-database.init_db()
-refresh_list()
-refresh_adopted_list()
+
+def on_species_selected(event):
+    sp = combobox_species.get()
+    combobox_breed['values'] = species_map.get(sp, [])
+    combobox_breed.set('')  # очистить прошлый выбор
+
+combobox_species.bind("<<ComboboxSelected>>", on_species_selected)
 
 # ======= БИНДИНГИ =======
 tree.bind("<Button-1>", on_tree_click)
@@ -544,11 +959,19 @@ root.bind("<F11>", toggle_fullscreen)
 root.bind("<Escape>", lambda e: toggle_fullscreen() if fullscreen else None)
 tree.bind("<Button-1>", on_tree_click)
 tree.bind("<Double-1>", on_double_click)
+tree_adopted.bind("<Double-1>", on_adopted_double_click)
+lst_med.bind("<Motion>", on_motion)
+lst_med.bind("<Leave>", on_leave)
+lst_med.bind("<<ListboxSelect>>", on_med_select)
+list_frame.bind('<Configure>', adjust_med_list_width)
 
 # словарь для хранения ID таймеров мигания
 blink_timers = {}
 
 # Запуск
-refresh_list()
+database.init_db()          # Сначала создаём/мигрируем все таблицы
+refresh_list()              # Затем наполняем главную таблицу приюта
+refresh_adopted_list()      # Потом таблицу «Переданы»
+refresh_med_list()          # И, наконец, список для «Медицина»
 root.mainloop()
 
