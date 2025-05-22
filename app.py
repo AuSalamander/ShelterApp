@@ -75,6 +75,40 @@ tip = None
 
 # Функции действий
 
+def update_med_tab_title():
+    base = "Медицина"
+    if notified_animals:
+        notebook.tab(tab_med,
+                     text=base,
+                     image=_yellow_dot,
+                     compound='right')
+    else:
+        notebook.tab(tab_med,
+                     text=base,
+                     image=_blank_img,
+                     compound='right')
+
+def blink_list_item(index):
+    global blink_list_timer, blink_list_state, blink_index
+    # отменяем старое мигание
+    if blink_list_timer is not None:
+        root.after_cancel(blink_list_timer)
+        # сбросим предыдущую строку
+        if blink_index is not None:
+            lst_med.itemconfig(blink_index, bg='')
+    blink_index = index
+    blink_list_state = False
+
+    def _blink():
+        global blink_list_state, blink_list_timer
+        # чередуем bg и пустой
+        color = 'yellow' if blink_list_state else ''
+        lst_med.itemconfig(blink_index, bg=color)
+        blink_list_state = not blink_list_state
+        blink_list_timer = root.after(250, _blink)
+
+    _blink()
+
 def attach_event_doc_dialog(aid, eid, refresh_cb):
     # 1) Открываем именно папку docs/aid
     folder = os.path.abspath(f"docs/{aid}")
