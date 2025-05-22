@@ -1,8 +1,74 @@
 import sqlite3
 import os
 import glob
+import json
 
 DB_NAME = 'shelter.db'
+
+def add_event_doc(event_id: int, filename: str):
+    """Сохраняет в БД, что к событию прикреплён уже существующий файл filename."""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT OR IGNORE INTO event_docs(event_id, filename)
+        VALUES (?, ?)
+    ''', (event_id, filename))
+    conn.commit()
+    conn.close()
+
+def delete_event_doc(event_id: int, filename: str):
+    """Удаляет только ссылку из БД, сам файл на диске остаётся."""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+        DELETE FROM event_docs
+          WHERE event_id = ? AND filename = ?
+    ''', (event_id, filename))
+    conn.commit()
+    conn.close()
+
+def get_event_docs(event_id: int):
+    """Возвращает список имён файлов, сохранённых в БД для этого события."""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT filename
+          FROM event_docs
+         WHERE event_id = ?
+         ORDER BY filename
+    ''', (event_id,))
+    rows = [row[0] for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+def update_event_field(event_id: int, field: str, value):
+    """
+    Обновляет одно поле в таблице events.
+    field — 'type', 'date_start', 'date_end' или 'conclusion'.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    if field not in ('type','date_start','date_end','conclusion','results'):
+        conn.close()
+        raise ValueError("Недопустимое поле")
+    cur.execute(f"UPDATE events SET {field} = ? WHERE id = ?", (value, event_id))
+    conn.commit()
+    conn.close()
+
+def update_event_results(event_id: int, results_json: str):
+    """
+    Перезаписывает колонку results для события event_id.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('''
+        UPDATE events
+           SET results = ?
+         WHERE id = ?
+    ''', (results_json, event_id))
+    conn.commit()
+    conn.close()
+
 
 def add_event(animal_id: int,
               etype: str,
@@ -15,11 +81,13 @@ def add_event(animal_id: int,
     """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
+    # results — либо строка JSON, либо None
+    r = results if isinstance(results, str) else (json.dumps(results) if results else None)
     cur.execute('''
         INSERT INTO events
             (animal_id, type, date_start, date_end, conclusion, results)
         VALUES (?, ?, ?, ?, ?, ?)
-    ''', (animal_id, etype, date_start, date_end, conclusion, results))
+    ''', (animal_id, etype, date_start, date_end, conclusion, r))
     conn.commit()
     new_id = cur.lastrowid
     conn.close()
@@ -48,14 +116,10 @@ def get_animal_events(animal_id: int):
 
     events = []
     for etype, ds, de, concl, results, eid in rows:
-        # для каждого события только свои файлы
-        if os.path.isdir(docs_dir):
-            event_docs = [
-                p for p in glob.glob(f"{docs_dir}/*")
-                if os.path.basename(p).startswith(f"{eid}_")
-            ]
-        else:
-            event_docs = []
+        # теперь берём только имена из таблицы event_docs
+        event_docs = get_event_docs(eid)
+        # но для UI нам надо полный путь
+        event_docs = [os.path.join(docs_dir, fn) for fn in event_docs]
 
         events.append((
             etype,
@@ -164,6 +228,16 @@ def init_db():
             results     TEXT            -- свободный текст/числа в JSON или CSV
             -- внешний ключ на animals не обязателен, но можно добавить:
             -- , FOREIGN KEY(animal_id) REFERENCES animals(id)
+        )
+    ''')
+
+    # --- event_docs ---
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS event_docs (
+            event_id   INTEGER NOT NULL,
+            filename   TEXT    NOT NULL,
+            PRIMARY KEY(event_id, filename),
+            FOREIGN KEY(event_id) REFERENCES events(id)
         )
     ''')
 

@@ -8,6 +8,7 @@ import tkinter.simpledialog as sd
 import os
 import glob
 import shutil
+import json
 
 database.init_db()
 
@@ -38,123 +39,273 @@ for section in cfg.sections():
     species_map[section] = breeds
 today = date.today()
 cfg = {}
+# Парсим cfg.txt
+event_result_map = {}  # etype -> list of (field_name, field_type)
+current_etype = None
+
 with open("cfg.txt", encoding="utf-8") as f:
-    for raw in f:
-        line = raw.split('#', 1)[0].strip()  # отсекаем всё после #
-        if not line or '=' not in line:
+    for raw_line in f:
+        line = raw_line.split('#', 1)[0].strip()
+        
+        if not line:
             continue
-        key, val = line.split('=', 1)
-        try:
-            cfg[key.strip()] = int(val.strip())
-        except ValueError:
-            # если не число — можно хранить как строку или пропускать
-            cfg[key.strip()] = val.strip()
+            
+        # Обработка новой секции
+        if '=' in line:
+            if current_etype is not None:
+                event_result_map[current_etype] = current_specs
+            etype, remainder = line.split('=', 1)
+            current_etype = etype.strip()
+            current_specs = []
+            line = remainder.strip()
+            
+        # Обработка полей (могут быть на следующих строках)
+        if current_etype is not None and ':' in line:
+            fields = [f.strip() for f in line.split(',') if f.strip()]
+            for field in fields:
+                if ':' not in field:
+                    continue
+                name, typ = field.split(':', 1)
+                current_specs.append((name.strip(), typ.strip()))
+                
+    # Добавить последнюю секцию
+    if current_etype is not None:
+        event_result_map[current_etype] = current_specs
 tip = None
 
 # Функции действий
 
-def open_event_dialog(aid, refresh_cb):
-    dlg = tk.Toplevel(root)
+def attach_event_doc_dialog(aid, eid, refresh_cb):
+    # 1) Открываем именно папку docs/aid
+    folder = os.path.abspath(f"docs/{aid}")
+    os.makedirs(folder, exist_ok=True)
+    path = filedialog.askopenfilename(
+        title="Выберите файл в папке", initialdir=folder
+    )
+    if not path:
+        return
+    fn = os.path.basename(path)
+    # 2) Записываем ссылку в БД
+    database.add_event_doc(eid, fn)
+    # 3) Перерисовываем карточку
+    refresh_cb()
+
+def open_event_dialog(
+    aid: int,
+    refresh_cb,
+    pre_type: str = None,
+    pre_ds: str = None,
+    pre_de: str = None,
+    pre_concl: str = None,
+    pre_results: dict = None,
+    pre_docs: list = None
+):
+    """
+    aid             — ID животного
+    refresh_cb      — функция, которую нужно вызвать после создания/редактирования события
+    pre_*           — опциональные заранее заданные значения
+    """
     name = database.get_animal_by_id(aid)[1]
+    dlg = tk.Toplevel(root)
     dlg.title(f"Новое событие для #{aid} ({name})")
+    dlg.geometry("540x520")
+    dlg.minsize(400, 300)
+    
+    # Создаем канвас и скроллбар
+    canvas = tk.Canvas(dlg)
+    scrollbar = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+    scrollable_frame = ttk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Размещаем элементы скролла
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    
+    scrollable_frame.columnconfigure(1, weight=1)
 
-    # Поля
-    ttk.Label(dlg, text="Тип события:").grid(row=0, column=0, sticky='w', padx=5, pady=2)
-    ent_type = ttk.Entry(dlg); ent_type.grid(row=0, column=1, sticky='ew', padx=5, pady=2)
+    # --- Тип события ---
+    row = 0
+    ttk.Label(scrollable_frame, text="Тип события:").grid(row=row, column=0, sticky='w', padx=5, pady=5)
+    cb_values = list(event_result_map.keys()) + ["Другое"]
+    cmb_type = ttk.Combobox(scrollable_frame, values=cb_values, state="readonly", width=40)
+    cmb_type.grid(row=row, column=1, sticky='w', padx=5, pady=5)
+    cmb_type.set(pre_type or cb_values[0])
 
-    ttk.Label(dlg, text="Дата начала (YYYY-MM-DD):").grid(row=1, column=0, sticky='w', padx=5, pady=2)
-    ent_ds = ttk.Entry(dlg); ent_ds.grid(row=1, column=1, sticky='ew', padx=5, pady=2)
+    # Поле для ввода неименных типов
+    row += 1
+    lbl_other = ttk.Label(scrollable_frame, text="Укажите тип:")
+    ent_other = ttk.Entry(scrollable_frame, width=40)
+    
+    def show_other_field():
+        if cmb_type.get() == "Другое":
+            lbl_other.grid(row=row, column=0, sticky='w', padx=5, pady=5)
+            ent_other.grid(row=row, column=1, sticky='w', padx=5, pady=5)
+        else:
+            lbl_other.grid_forget()
+            ent_other.grid_forget()
+            
+    show_other_field()  # Показываем/скрываем поле при инициализации
+    
+    def on_type_change(event=None):
+        show_other_field()
+        rebuild_results()
+    
+    cmb_type.bind("<<ComboboxSelected>>", on_type_change)
 
-    ttk.Label(dlg, text="Дата окончания (опционально):").grid(row=2, column=0, sticky='w', padx=5, pady=2)
-    ent_de = ttk.Entry(dlg); ent_de.grid(row=2, column=1, sticky='ew', padx=5, pady=2)
+    # --- Даты ---
+    row += 1
+    ttk.Label(scrollable_frame, text="Дата начала (YYYY-MM-DD):")\
+        .grid(row=row, column=0, sticky='w', padx=5, pady=5)
+    ent_ds = ttk.Entry(scrollable_frame, width=40)
+    ent_ds.grid(row=row, column=1, sticky='w', padx=5, pady=5)
+    if pre_ds: ent_ds.insert(0, pre_ds)
 
-    ttk.Label(dlg, text="Заключение:").grid(row=3, column=0, sticky='nw', padx=5, pady=2)
-    txt_concl = tk.Text(dlg, height=4); txt_concl.grid(row=3, column=1, sticky='ew', padx=5, pady=2)
+    row += 1
+    ttk.Label(scrollable_frame, text="Дата окончания:")\
+        .grid(row=row, column=0, sticky='w', padx=5, pady=5)
+    ent_de = ttk.Entry(scrollable_frame, width=40)
+    ent_de.grid(row=row, column=1, sticky='w', padx=5, pady=5)
+    if pre_de: ent_de.insert(0, pre_de)
 
-    ttk.Label(dlg, text="Результаты:").grid(row=4, column=0, sticky='nw', padx=5, pady=2)
-    txt_res = tk.Text(dlg, height=4); txt_res.grid(row=4, column=1, sticky='ew', padx=5, pady=2)
+    # --- Заключение ---
+    row += 1
+    ttk.Label(scrollable_frame, text="Заключение:").grid(row=row, column=0, sticky='nw', padx=5, pady=5)
+    txt_concl = tk.Text(scrollable_frame, height=4, width=40)
+    txt_concl.grid(row=row, column=1, sticky='w', padx=5, pady=5)
+    if pre_concl: txt_concl.insert('1.0', pre_concl)
 
-    # Выбор документов
-    doc_paths = []
+    # Prepare frames for results and docs
+    results_frame = ttk.Frame(scrollable_frame)
+    results_frame.grid(row=row+1, column=0, columnspan=2, sticky='ew')
+    docs_frame = ttk.Frame(scrollable_frame)
+    docs_frame.grid(row=row+2, column=0, columnspan=2, sticky='ew', padx=5, pady=(10,0))
+
+    result_vars = {}
+    row_results_start = 0
+
+    def rebuild_results():
+        nonlocal row_results_start
+        for w in results_frame.winfo_children():
+            w.destroy()
+        result_vars.clear()
+        et = cmb_type.get()
+        if et == "Другое":
+            et = ent_other.get().strip()
+        specs = event_result_map.get(et, [])
+        if not specs:
+            row_results_start = 4
+            return
+        # header
+        ttk.Label(results_frame, text="Результаты:", font=("",10,"underline"))\
+            .grid(row=0, column=0, sticky='w', padx=5, pady=(10,2))
+        row_results_start = 1
+        # fields
+        for i, (fname, ftype) in enumerate(specs):
+            ttk.Label(results_frame, text=f"{fname} ({ftype})")\
+                .grid(row=i+row_results_start, column=0, sticky='w', padx=5, pady=2)
+            ent = ttk.Entry(results_frame, width=40)
+            ent.grid(row=i+row_results_start, column=1, sticky='w', padx=5, pady=2)
+            if pre_results and fname in pre_results:
+                ent.insert(0, str(pre_results[fname]))
+            result_vars[fname] = (ent, ftype)
+
+    rebuild_results()
+
+    cmb_type.bind("<<ComboboxSelected>>", lambda e: rebuild_results())
+    ent_other.bind("<KeyRelease>", lambda e: rebuild_results())
+
+    # --- Документы ---
+    ttk.Label(docs_frame, text="Прикреплённые файлы:", font=("",10,"underline"))\
+        .grid(row=0, column=0, sticky='w')
+    docs_frame.columnconfigure(0, weight=1)
+
+    doc_paths = pre_docs.copy() if pre_docs else []
+    lb = tk.Listbox(docs_frame, height=5)
+    sb = ttk.Scrollbar(docs_frame, orient='vertical', command=lb.yview)
+    lb.configure(yscrollcommand=sb.set)
+    lb.grid(row=1, column=0, sticky='nsew', pady=(2,0))
+    sb.grid(row=1, column=1, sticky='ns', pady=(2,0))
+
+    for fn in doc_paths:
+        lb.insert('end', fn)
+
     def choose_docs():
-        files = filedialog.askopenfilenames(title="Выберите файлы")
-        if files:
-            doc_paths[:] = files
-            lbl_docs.config(text=f"{len(files)} файл(ов) выбрано")
-    btn_docs = ttk.Button(dlg, text="Прикрепить документы…", command=choose_docs)
-    btn_docs.grid(row=5, column=0, columnspan=2, pady=5)
-    lbl_docs = ttk.Label(dlg, text="Файлы не выбраны")
-    lbl_docs.grid(row=6, column=0, columnspan=2, pady=(0,5))
+        folder = os.path.abspath(f"docs/{aid}")
+        os.makedirs(folder, exist_ok=True)
+        files = filedialog.askopenfilenames(
+            title="Выберите файлы", initialdir=folder
+        )
+        for p in files:
+            fn = os.path.basename(p)
+            if fn not in doc_paths:
+                doc_paths.append(fn)
+                lb.insert('end', fn)
 
-    # кнопки
+    def remove_selected():
+        for idx in reversed(lb.curselection()):
+            fn = lb.get(idx)
+            doc_paths.remove(fn)
+            lb.delete(idx)
+
+    btn_add_docs = ttk.Button(docs_frame, text="Добавить файлы…", command=choose_docs)
+    btn_remove_doc = ttk.Button(docs_frame, text="Удалить выделенное", command=remove_selected)
+    btn_add_docs.grid(row=2, column=0, sticky='w', pady=(5,0))
+    btn_remove_doc.grid(row=2, column=0, sticky='e', pady=(5,0))
+
+    # --- Кнопки подтверждения ---
+    frm_btn = ttk.Frame(scrollable_frame)
+    frm_btn.grid(row=row+3, column=0, columnspan=2, pady=10)
+    
     def on_confirm():
-        etype = ent_type.get().strip()
+        et = cmb_type.get()
+        if et == "Другое":
+            et = ent_other.get().strip()
         ds = ent_ds.get().strip()
         de = ent_de.get().strip() or None
-        concl = txt_concl.get("1.0", "end").strip() or None
-        res = txt_res.get("1.0", "end").strip() or None
-        if not etype or not ds:
-            messagebox.showwarning("Ошибка", "Укажите тип и дату начала")
+        concl = txt_concl.get("1.0","end").strip() or None
+        if not et or not ds:
+            messagebox.showwarning("Ошибка", "Тип и дата начала обязательны")
             return
-
-        # 1) создаём запись
-        eid = database.add_event(aid, etype, ds, de, concl, res)
-
-        # 2) копируем файлы (если есть) в docs/aid/ с префиксом eid_
-        dest_dir = os.path.join("docs", str(aid))
-        os.makedirs(dest_dir, exist_ok=True)
-        for p in doc_paths:
-            fn = f"{eid}_{os.path.basename(p)}"
-            shutil.copy(p, os.path.join(dest_dir, fn))
-
+        # results
+        if result_vars:
+            data = {}
+            for f, (e, t) in result_vars.items():
+                v = e.get().strip()
+                if v:
+                    try:
+                        data[f] = int(v) if t=="int" else float(v) if t in ("float","double") else v
+                    except:
+                        messagebox.showwarning("Ошибка", f"Неверный формат для {f}")
+                        return
+            res = data
+        else:
+            res = None
+        # add event
+        eid = database.add_event(aid, et, ds, de, concl, res)
+        # save docs links
+        for fn in doc_paths:
+            database.add_event_doc(eid, fn)
         dlg.destroy()
         refresh_cb()
 
-    frm_btn = ttk.Frame(dlg)
-    frm_btn.grid(row=7, column=0, columnspan=2, pady=10)
     ttk.Button(frm_btn, text="Отмена", command=dlg.destroy).grid(row=0, column=0, padx=5)
-    ttk.Button(frm_btn, text="Создать", command=on_confirm).grid(row=0, column=1, padx=5)
+    ttk.Button(frm_btn, text="ОК", command=on_confirm).grid(row=0, column=1, padx=5)
 
-    # растягиваем поля
-    dlg.columnconfigure(1, weight=1)
+    # Добавляем прокрутку колесом мыши
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    canvas.bind_all("<MouseWheel>", _on_mousewheel)
+    
     dlg.transient(root)
     dlg.grab_set()
-    ent_type.focus()
-
-
-def update_med_tab_title():
-    base = "Медицина"
-    if notified_animals:
-        notebook.tab(tab_med,
-                     text=base,
-                     image=_yellow_dot,
-                     compound='right')
-    else:
-        notebook.tab(tab_med,
-                     text=base,
-                     image=_blank_img,
-                     compound='right')
-
-def blink_list_item(index):
-    global blink_list_timer, blink_list_state, blink_index
-    # отменяем старое мигание
-    if blink_list_timer is not None:
-        root.after_cancel(blink_list_timer)
-        # сбросим предыдущую строку
-        if blink_index is not None:
-            lst_med.itemconfig(blink_index, bg='')
-    blink_index = index
-    blink_list_state = False
-
-    def _blink():
-        global blink_list_state, blink_list_timer
-        # чередуем bg и пустой
-        color = 'yellow' if blink_list_state else ''
-        lst_med.itemconfig(blink_index, bg=color)
-        blink_list_state = not blink_list_state
-        blink_list_timer = root.after(250, _blink)
-
-    _blink()
+    cmb_type.focus()
 
 def stop_list_blink():
     global blink_list_timer, blink_index
@@ -246,7 +397,6 @@ def open_medical(aid):
     if aid in notified_animals:
         notified_animals.remove(aid)
         update_med_tab_title()
-        refresh_med_list()
         stop_list_blink()
 
     # Очищаем detail_frame
@@ -425,7 +575,7 @@ def open_medical(aid):
     )
 
     # Canvas для горизонтальной прокрутки
-    events_canvas = tk.Canvas(scroll_frame, height=2000, borderwidth=0)
+    events_canvas = tk.Canvas(scroll_frame, height=1000, borderwidth=0)
     hsb = ttk.Scrollbar(scroll_frame, orient="horizontal", command=events_canvas.xview)
     events_frame = ttk.Frame(events_canvas)
 
@@ -446,49 +596,221 @@ def open_medical(aid):
         col = ttk.Frame(events_frame, width=COL_W, relief='groove', padding=5)
         col.grid(row=0, column=idx, padx=(0 if idx==0 else PAD_X, 0), sticky='n')
 
-        def attach_event_doc(event_id=eid):
-            path = filedialog.askopenfilename(title="Выберите документ")
-            if not path:
-                return
-            dest_dir = os.path.join("docs", str(aid))
-            os.makedirs(dest_dir, exist_ok=True)
-            fn = f"{event_id}_{os.path.basename(path)}"
-            shutil.copy(path, os.path.join(dest_dir, fn))
-            open_medical(aid)  # перерисуем карточку
+        # === row 0: Тип события ===
+        row_type = 0
+        lbl_type = ttk.Label(col, text=etype, font=("", 10, "bold"))
+        lbl_type.grid(row=row_type, column=0, sticky='w', pady=(0,4))
 
-        # 1) Тип события
-        ttk.Label(col, text=etype, font=("", 10, "bold")).pack(anchor='w', pady=(0,4))
+        # Фабрика колбэка, захватываем col и row_type
+        def make_type_editor(frame=col, r=row_type, original=etype, ev_id=eid):
+            def on_edit_type(event):
+                frame.grid_propagate(False)    # чтобы размеры фрейма не подпрыгивали
+                lbl_type.grid_forget()
+                ent = ttk.Entry(frame, font=("", 10, "bold"))
+                ent.insert(0, original)
+                ent.grid(row=r, column=0, sticky='w', pady=(0,4))
+                ent.focus()
+                def save(e=None):
+                    new = ent.get().strip()
+                    if not new:
+                        messagebox.showwarning("Ошибка", "Название не может быть пустым")
+                        ent.focus()
+                        return
+                    database.update_event_field(ev_id, 'type', new)
+                    open_medical(aid)
+                ent.bind('<Return>', save)
+                ent.bind('<FocusOut>', save)
+            return on_edit_type
 
-        # 2) Даты
-        date_text = ds if not de or ds==de else f"{ds} — {de}"
-        ttk.Label(col, text=date_text).pack(anchor='w', pady=(0,4))
+        # Привязываем с замыканием
+        lbl_type.bind('<Double-1>', make_type_editor())
 
-        # 3) Профзаключение
-        ttk.Label(col, text="Заключение:", font=("", 9, "underline")).pack(anchor='w')
-        ttk.Label(col, text=concl or "—", wraplength=COL_W-10).pack(anchor='w', pady=(0,4))
+        # === row 1: Даты ===
+        row_dates = 1
+        date_text = ds if not de or ds == de else f"{ds} — {de}"
+        lbl_dates = ttk.Label(col, text=date_text)
+        lbl_dates.grid(row=row_dates, column=0, sticky='w', pady=(0,4))
 
-        # 4) Документы
-        ttk.Label(col, text="Документы:", font=("", 9, "underline")).pack(anchor='w', pady=(4,0))
-        if doc_list:
-            for p in doc_list:
-                fn = os.path.basename(p)
-                btn = ttk.Button(col, text=fn, command=lambda p=p: os.startfile(p))
-                btn.pack(anchor='w', pady=1)
-            ttk.Button(col, text="Прикрепить документ…", command=attach_event_doc) \
-                .pack(anchor='w', pady=2)
+        def make_dates_editor(frame=col, r=row_dates, orig_ds=ds, orig_de=de, ev_id=eid):
+            def on_edit_dates(event):
+                frame.grid_propagate(False)
+                lbl_dates.grid_forget()
+                frm = ttk.Frame(frame)
+                frm.grid(row=r, column=0, sticky='w', pady=(0,4))
+                ent_ds = ttk.Entry(frm, width=10)
+                ent_ds.insert(0, orig_ds)
+                ent_de = ttk.Entry(frm, width=10)
+                ent_de.insert(0, orig_de or orig_ds)
+                ent_ds.grid(row=0, column=0, padx=(0,5))
+                ent_de.grid(row=0, column=1)
+                ent_ds.focus()
+                def save(e=None):
+                    nds = ent_ds.get().strip()
+                    nde = ent_de.get().strip()
+                    try:
+                        date.fromisoformat(nds)
+                        date.fromisoformat(nde)
+                    except:
+                        messagebox.showwarning("Ошибка", "Даты должны быть YYYY-MM-DD")
+                        return
+                    database.update_event_field(ev_id, 'date_start', nds)
+                    database.update_event_field(ev_id, 'date_end',
+                                                None if nde == nds else nde)
+                    open_medical(aid)
+                ent_ds.bind('<Return>', save)
+                ent_de.bind('<Return>', save)
+                ent_de.bind('<FocusOut>', save)
+            return on_edit_dates
+
+        lbl_dates.bind('<Double-1>', make_dates_editor())
+
+
+        # === row 2: Профзаключение ===
+        row_concl = 2
+        lbl_concl = ttk.Label(col, text=concl or "—", wraplength=COL_W-10)
+        lbl_concl.grid(row=row_concl, column=0, sticky='w', pady=(0,4))
+
+        def make_concl_editor(frame=col, r=row_concl, orig=concl or "", ev_id=eid):
+            def on_edit_concl(event):
+                frame.grid_propagate(False)
+                lbl_concl.grid_forget()
+                txt = tk.Text(frame, height=3, wrap='word')
+                txt.insert('1.0', orig)
+                txt.grid(row=r, column=0, sticky='ew', pady=(0,4))
+                txt.focus()
+                def save(e=None):
+                    new = txt.get('1.0','end').strip()
+                    database.update_event_field(ev_id, 'conclusion', new)
+                    open_medical(aid)
+                txt.bind('<Return>', save)
+                txt.bind('<FocusOut>', save)
+            return on_edit_concl
+
+        lbl_concl.bind('<Double-1>', make_concl_editor())
+
+        # === 3) Документы события (адаптивно в строку + перенос) ===
+        ew_docs = database.get_event_docs(eid)  # это уже просто список имён файлов
+        ew_docs_frame = ttk.LabelFrame(col, text="Документы")
+        ew_docs_frame.grid(row=4, column=0, sticky='ew', pady=(0,4), padx=2)
+        ew_docs_frame.columnconfigure(0, weight=1)
+
+        # узнаём доступную ширину
+        ew_docs_frame.update_idletasks()
+        max_px = ew_docs_frame.winfo_width() or COL_W
+        pad = 6
+
+        row = 0
+        col_idx = 0
+        used_px = 0
+
+        if ew_docs:
+            for fn in ew_docs:
+                # создаём временную кнопку, чтобы измерить ширину
+                tmp = ttk.Button(ew_docs_frame, text=fn)
+                tmp.update_idletasks()
+                bw = tmp.winfo_reqwidth() + pad
+                tmp.destroy()
+
+                # перенос, если не влезает
+                if used_px + bw > max_px and col_idx > 0:
+                    row += 1
+                    col_idx = 0
+                    used_px = 0
+
+                # контейнер для пары кнопок
+                sub = ttk.Frame(ew_docs_frame)
+                sub.grid(row=row, column=col_idx, sticky='w', padx=2, pady=2)
+
+                # кнопка «Открыть»
+                btn_open = ttk.Button(
+                    sub, text=fn,
+                    command=lambda aid=aid, fn=fn: os.startfile(f"docs/{aid}/{fn}")
+                )
+                btn_open.grid(row=0, column=0, sticky='w')
+
+                # кнопка «×» (удалить ссылку)
+                btn_del = ttk.Button(
+                    sub, text="×", width=2,
+                    command=lambda ev_id=eid, fn=fn: (
+                        database.delete_event_doc(ev_id, fn),
+                        open_medical(aid)
+                    )
+                )
+                btn_del.grid(row=0, column=1, sticky='w', padx=(4,0))
+
+                used_px += bw
+                col_idx += 1
+
+            # кнопка «Прикрепить ещё» сразу под последним рядом
+            ttk.Button(
+                ew_docs_frame,
+                text="Прикрепить документ…",
+                command=lambda ev_id=eid: attach_event_doc_dialog(aid, ev_id, lambda: open_medical(aid))
+            ).grid(row=row+1, column=0, sticky='w', pady=(4,0), padx=2)
+
         else:
+            # если нет файлов
             tk.Button(
-                col, text="Документов нет, прикрепить…",
+                ew_docs_frame,
+                text="Документов нет, прикрепить…",
                 bg="red", fg="white",
-                command=attach_event_doc
-            ).pack(anchor='w', pady=5)
+                command=lambda ev_id=eid: attach_event_doc_dialog(aid, ev_id, lambda: open_medical(aid))
+            ).grid(row=0, column=0, sticky='w', pady=(2,4), padx=2)
 
-        # 5) Результаты (если есть)
-        ttk.Label(col, text="Результаты:", font=("", 9, "underline")).pack(anchor='w', pady=(4,0))
-        if results:
-            ttk.Label(col, text=results, wraplength=COL_W-10).pack(anchor='w')
-        else:
-            ttk.Label(col, text="—").pack(anchor='w')
+        # 4) Результаты
+        specs = event_result_map.get(etype, [])
+        frm_res = ttk.LabelFrame(col, text="Результаты")
+        frm_res.grid(row=6, column=0, sticky='ew', pady=(4,0))
+        frm_res.columnconfigure(0, weight=1)
+
+        # парсим JSON-строку, если есть
+        try:
+            master_data = json.loads(results) if results else {}
+        except:
+            master_data = {}
+
+        for i, (fname, ftype) in enumerate(specs):
+            val = master_data.get(fname, "")
+
+            lbl = ttk.Label(frm_res, text=f"{fname}: {val}", anchor='w')
+            lbl.grid(row=i, column=0, sticky='ew', padx=2, pady=1)
+
+            def make_res_editor(frame=frm_res, row=i, field=fname,
+                                orig_data=master_data, ev_id=eid, ftype=ftype):
+                # orig_data — это ссылка на словарь, поэтому копируем его
+                data = orig_data.copy()
+                def on_edit(event):
+                    frame.grid_propagate(False)
+                    lbl.grid_forget()
+                    ent = ttk.Entry(frame)
+                    ent.insert(0, str(data.get(field, "")))
+                    ent.grid(row=row, column=0, sticky='ew', padx=2, pady=1)
+                    ent.focus()
+                    def save(e=None):
+                        new = ent.get().strip()
+                        try:
+                            if ftype == 'int':
+                                cast = int(new)
+                            elif ftype in ('float', 'double'):
+                                cast = float(new)
+                            else:
+                                cast = new
+                        except:
+                            messagebox.showwarning("Ошибка", f"Неверный формат для {field}")
+                            ent.focus()
+                            return
+                        data[field] = cast
+                        # сохраняем JSON полностью обновлённым
+                        database.update_event_results(ev_id, json.dumps(data))
+                        open_medical(aid)
+                    ent.bind('<Return>', save)
+                    ent.bind('<FocusOut>', save)
+                return on_edit
+
+            lbl.bind('<Double-1>', make_res_editor())
+
+
+
 
 
 def refresh_med_list():
