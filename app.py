@@ -1263,11 +1263,35 @@ def delete():
 
 def get_default_quarantine_cage():
     taken = database.get_all_cage_numbers()
-    # выбираем только карантинные: начинаются с "К" и 4 hex-цифры
-    used = {int(cn[1:], 16) for cn in taken if cn.startswith("К")}
+    
+    # Таблица замены кириллических букв на латинские (только для символов, используемых в HEX)
+    CYRILLIC_TO_LATIN = str.maketrans({
+        'А': 'A',  # Русская 'А' -> латинская 'A'
+        'В': 'B',  # Русская 'В' -> латинская 'B'
+        'С': 'C',  # Русская 'С' -> латинская 'C'
+        'Е': 'E',  # Русская 'Е' -> латинская 'E'
+        'а': 'a',  # Русская строчная 'а'
+        'в': 'b',  # Русская строчная 'в'
+        'с': 'c',  # Русская строчная 'с'
+        'е': 'e',  # Русская строчная 'е'
+    })
+    
+    used = set()
+    for cn in taken:
+        if cn.startswith("К"):
+            # Заменяем кириллические символы и пробуем преобразовать
+            hex_part = cn[1:].translate(CYRILLIC_TO_LATIN)
+            try:
+                num = int(hex_part, 16)
+                used.add(num)
+            except ValueError:
+                print(f"⚠ Некорректный номер клетки: {cn} (после замены: {hex_part})")
+    
+    # Ищем первый свободный номер
     for i in range(0x10000):
         if i not in used:
             return f"К{i:04X}"
+    
     raise RuntimeError("Нет свободных карантинных клеток")
 
 # === Главное окно ===
