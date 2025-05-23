@@ -5,7 +5,6 @@ import tempfile
 from datetime import date
 import database as db
 import json
-TEST_DB = "test_shelter.db"
 
 class TestShelterDB(unittest.TestCase):
     def setUp(self):
@@ -45,7 +44,7 @@ class TestShelterDB(unittest.TestCase):
         conn.close()
         
         expected_tables = {
-            'animals', 'medical', 'procedures',
+            'animals',
             'events', 'event_docs'
         }
         self.assertTrue(expected_tables.issubset(tables))

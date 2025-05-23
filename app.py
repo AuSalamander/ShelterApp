@@ -1280,10 +1280,11 @@ def get_default_quarantine_cage():
 
 # === Главное окно ===
 root = tk.Tk()
-root.title("Приют: учёт животных")
+root.title("ShelterApp")
 root.geometry("1000x750")
 root.columnconfigure(0, weight=1)
 root.rowconfigure(0, weight=1)
+root.iconbitmap(default="img/icon.png")
 
 # === Верх: Notebook с двумя вкладками ===
 notebook = ttk.Notebook(root)
