@@ -221,28 +221,6 @@ def init_db():
     if 'deleted' not in columns:
         cur.execute('ALTER TABLE events ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0')
 
-    # --- medical ---
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS medical (
-            animal_id       INTEGER PRIMARY KEY,
-            quarantine_days INTEGER DEFAULT 0,
-            notes           TEXT DEFAULT ''
-        )
-    ''')
-
-    # --- procedures ---
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS procedures (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            animal_id    INTEGER,
-            type         TEXT,
-            scheduled    TEXT,
-            completed    INTEGER,
-            completed_at TEXT,
-            result       TEXT
-        )
-    ''')
-
     # --- event_docs ---
     cur.execute('''
         CREATE TABLE IF NOT EXISTS event_docs (
