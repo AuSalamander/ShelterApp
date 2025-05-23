@@ -9,6 +9,7 @@ import os
 import glob
 import shutil
 import json
+import unittest
 
 database.init_db()
 
@@ -331,11 +332,6 @@ def open_event_dialog(
 
     ttk.Button(frm_btn, text="Отмена", command=dlg.destroy).grid(row=0, column=0, padx=5)
     ttk.Button(frm_btn, text="ОК", command=on_confirm).grid(row=0, column=1, padx=5)
-
-    # Добавляем прокрутку колесом мыши
-    def _on_mousewheel(event):
-        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-    canvas.bind_all("<MouseWheel>", _on_mousewheel)
     
     dlg.transient(root)
     dlg.grab_set()
@@ -536,7 +532,6 @@ def open_medical(aid):
                     else:  # Для MacOS/Linux (может потребовать настройки)
                         os.system(f'open "{folder_path}"' if sys.platform == 'darwin' else f'xdg-open "{folder_path}"')
 
-                # В вашем коде кнопки:
                 btn = tk.Button(
                     docs_frame,
                     text="Документов нет, нажмите чтобы добавить",
@@ -587,7 +582,7 @@ def open_medical(aid):
 
     # Оптимизированная привязка с троттлингом
     def delayed_update(event):
-        docs_frame.after(100, update_doc_buttons)
+        docs_frame.after(5, update_doc_buttons)
 
     docs_frame.bind("<Configure>", delayed_update)
 
@@ -622,7 +617,7 @@ def open_medical(aid):
 
     events_canvas.grid(row=5, column=0, sticky='ew')
     hsb.grid(row=4, column=0, sticky='ew')
-    COL_W = 1000
+    COL_W = 400
     PAD_X = 5
 
     # Наполняем
@@ -921,24 +916,13 @@ def open_adopt_dialog(animal_id):
         except ValueError:
             messagebox.showwarning("Ошибка", "Неверный формат даты")
             return
-        # Сохраняем в adoptions и удаляем из animals
-            # Сначала получаем snapshot данных животного
-        row = database.get_animal_by_id(animal_id)
-        # row = (id, name, species, birth_date, age_estimated, arrival_date, cage, quarantine)
-        _, name, species, bd, est_flag, arr, _, _ = row
-
-        # Сохраняем в adoptions вместе с данными животного
-        database.add_adoption(
-            animal_id,
-            name, species, bd, est_flag, arr,
-            owner, contact, ad_date
-        )
-        # Только потом удаляем из основной таблицы
-        database.delete_animal(animal_id)
+        
+        database.add_adoption(animal_id, owner, contact, ad_date)
 
         dlg.destroy()
         refresh_list()
         refresh_adopted_list()
+        refresh_med_list()
 
     ttk.Button(dlg, text="Подтвердить", command=confirm).grid(row=3, column=0, pady=5)
     ttk.Button(dlg, text="Отмена",    command=dlg.destroy).grid(row=3, column=1, pady=5)
@@ -1496,11 +1480,11 @@ columns_adopted = (
 # сопоставляем col_id → имя поля в adoptions
 COLUMN_MAP_ADOPTED = {
     "#1": None,               # "ID животного" — не редактируем
-    "#2": None,               # "Имя" — snapshot, можно не править
-    "#3": None,               # "Вид" — snapshot, не правим
-    "#4": None,               # "Дата рождения" — snapshot
+    "#2": "name",             # "Имя" — snapshot, можно не править
+    "#3": "species",          # "Вид" — snapshot, не правим
+    "#4": "birth_date",       # "Дата рождения" — snapshot
     "#5": None,               # "Возраст (мес.)" — snapshot
-    "#6": None,               # "Дата поступления" — snapshot
+    "#6": "arrival_date",     # "Дата поступления" — snapshot
     "#7": "owner_name",       # редактируем имя владельца
     "#8": "owner_contact",    # редактируем контакт
     "#9": "adoption_date",    # редактируем дату передачи
@@ -1535,7 +1519,7 @@ def refresh_adopted_list():
 
     for rec in database.get_all_adoptions():
         # rec = (id, animal_id, name,...,owner,contact,ad_date)
-        (adopt_id, animal_id, name, species, bd, est_flag,
+        ( animal_id, name, species, bd, est_flag,
          arr, owner, contact, ad_date) = rec
 
         bdate = date.fromisoformat(bd)
@@ -1551,7 +1535,7 @@ def refresh_adopted_list():
         # сохраняем adopt_id в tags, чтобы потом знать, какую запись править
         tree_adopted.insert(
             '', 'end',
-            iid=str(adopt_id),   # или tags=[str(adopt_id)]
+            iid=str(animal_id),   # или tags=[str(adopt_id)]
             values=values
         )
     autofit_columns(tree_adopted, columns_adopted)

@@ -3,7 +3,7 @@ import os
 import glob
 import json
 
-DB_NAME = 'shelter.db'
+DB_NAME = "test_shelter.db"
 
 def add_event_doc(event_id: int, filename: str):
     """Сохраняет в БД, что к событию прикреплён уже существующий файл filename."""
@@ -96,31 +96,28 @@ def add_event(animal_id: int,
 
 def get_animal_events(animal_id: int):
     """
-    Возвращает список кортежей:
-      (type, date_start, date_end_or_None,
-       conclusion_or_empty, doc_paths_list, results_or_empty)
+    Возвращает только неудалённые события
     """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute('''
         SELECT type, date_start, date_end, conclusion, results, id
         FROM events
-        WHERE animal_id = ?
+        WHERE animal_id = ? 
+          AND deleted = 0
         ORDER BY date_start
     ''', (animal_id,))
-    rows = cur.fetchall()           # ← вот здесь получаем rows
+    rows = cur.fetchall()
     conn.close()
 
-    # Папка с документами для этого животного
     docs_dir = os.path.join('docs', str(animal_id))
-
+    
     events = []
     for etype, ds, de, concl, results, eid in rows:
-        # теперь берём только имена из таблицы event_docs
         event_docs = get_event_docs(eid)
-        # но для UI нам надо полный путь
-        event_docs = [os.path.join(docs_dir, fn) for fn in event_docs]
-
+        # Исправлено: нормализация путей для кроссплатформенности
+        event_docs = [os.path.normpath(os.path.join(docs_dir, fn)) for fn in event_docs]
+        
         events.append((
             etype,
             ds,
@@ -128,40 +125,46 @@ def get_animal_events(animal_id: int):
             concl or "",
             event_docs,
             results or "",
-            eid                # <-- добавили сюда
+            eid
         ))
     return events
 
 
-def update_adoption_field(adoption_id, field, value):
+def update_adoption_field(animal_id, field, value):
     """
-    Обновляет одно из полей в таблице adoptions:
-      owner_name, owner_contact или adoption_date
+    Обновляет поле усыновления для животного
     """
+    allowed_fields = {
+        'adoption_date', 
+        'owner_name', 
+        'owner_contact',
+        "arrival_date",
+        "name",
+        "species",
+        "birth_date",
+    }
+    
+    if field not in allowed_fields:
+        raise ValueError(f"Недопустимое поле для усыновления: {field}")
+
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-
-    # Список разрешённых полей
-    if field not in ("owner_name", "owner_contact", "adoption_date"):
-        conn.close()
-        raise ValueError(f"Недопустимое поле для обновления: {field}")
-
-    cur.execute(
-        f'UPDATE adoptions SET {field} = ? WHERE id = ?',
-        (value, adoption_id)
-    )
+    cur.execute(f'''
+        UPDATE animals
+        SET {field} = ?
+        WHERE id = ? AND adopted = 1
+    ''', (value, animal_id))
     conn.commit()
     conn.close()
 
 def init_db():
     """
-    Создаёт, если надо, все таблицы: animals, adoptions, medical, procedures.
-    Создаёт, если надо, все таблицы: animals, adoptions, medical, procedures.
+    Создаёт таблицы с поддержкой мягкого удаления и добавляет колонки
+    к существующим таблицам при необходимости.
     """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
 
-    # --- animals ---
     # --- animals ---
     cur.execute('''
         CREATE TABLE IF NOT EXISTS animals (
@@ -172,27 +175,51 @@ def init_db():
             age_estimated INTEGER NOT NULL DEFAULT 0,
             arrival_date TEXT,
             cage_number TEXT,
-            quarantine_until TEXT
+            quarantine_until TEXT,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            adopted INTEGER NOT NULL DEFAULT 0,          -- Флаг усыновления
+            adoption_date TEXT,                          -- Дата усыновления
+            owner_name TEXT,                              -- Имя владельца
+            owner_contact TEXT                            -- Контакты владельца
         )
     ''')
 
-    # --- adoptions ---
-    # --- adoptions ---
+    # Получаем список всех колонок один раз
+    cur.execute("PRAGMA table_info(animals)")
+    existing_columns = {row[1] for row in cur.fetchall()}
+
+    # Добавляем все недостающие колонки
+    columns_to_add = [
+        ('deleted', 'INTEGER NOT NULL DEFAULT 0'),
+        ('adopted', 'INTEGER NOT NULL DEFAULT 0'),
+        ('adoption_date', 'TEXT'),
+        ('owner_name', 'TEXT'),
+        ('owner_contact', 'TEXT')
+    ]
+
+    for col_name, col_type in columns_to_add:
+        if col_name not in existing_columns:
+            cur.execute(f'ALTER TABLE animals ADD COLUMN {col_name} {col_type}')
+
+    # --- events ---
     cur.execute('''
-        CREATE TABLE IF NOT EXISTS adoptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            animal_id INTEGER NOT NULL,
-            name TEXT,
-            species TEXT,
-            birth_date TEXT,
-            age_estimated INTEGER,
-            arrival_date TEXT,
-            owner_name TEXT NOT NULL,
-            owner_contact TEXT NOT NULL,
-            adoption_date TEXT NOT NULL,
-            FOREIGN KEY(animal_id) REFERENCES animals(id)
+        CREATE TABLE IF NOT EXISTS events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            animal_id   INTEGER NOT NULL,
+            type        TEXT    NOT NULL,
+            date_start  TEXT    NOT NULL,
+            date_end    TEXT,
+            conclusion  TEXT,
+            results     TEXT,
+            deleted     INTEGER NOT NULL DEFAULT 0
         )
     ''')
+
+    # Проверяем существование колонки deleted в events
+    cur.execute("PRAGMA table_info(events)")
+    columns = [row[1] for row in cur.fetchall()]
+    if 'deleted' not in columns:
+        cur.execute('ALTER TABLE events ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0')
 
     # --- medical ---
     cur.execute('''
@@ -216,21 +243,6 @@ def init_db():
         )
     ''')
 
-    # --- events ---
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS events (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            animal_id   INTEGER NOT NULL,
-            type        TEXT    NOT NULL,
-            date_start  TEXT    NOT NULL,
-            date_end    TEXT,           -- может быть NULL
-            conclusion  TEXT,
-            results     TEXT            -- свободный текст/числа в JSON или CSV
-            -- внешний ключ на animals не обязателен, но можно добавить:
-            -- , FOREIGN KEY(animal_id) REFERENCES animals(id)
-        )
-    ''')
-
     # --- event_docs ---
     cur.execute('''
         CREATE TABLE IF NOT EXISTS event_docs (
@@ -244,20 +256,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_adoption(animal_id, name, species, birth_date, age_estimated,
-                 arrival_date, owner_name, owner_contact, adoption_date):
+def add_adoption(animal_id, owner_name, owner_contact, adoption_date):
     """
-    Сохраняет snapshot данных животного вместе с информацией о новом владельце.
+    Помечает животное как усыновленное и сохраняет данные владельца
     """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute('''
-        INSERT INTO adoptions
-            (animal_id, name, species, birth_date, age_estimated,
-             arrival_date, owner_name, owner_contact, adoption_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (animal_id, name, species, birth_date, age_estimated,
-          arrival_date, owner_name, owner_contact, adoption_date))
+        UPDATE animals
+        SET adopted = 1,
+            adoption_date = ?,
+            owner_name = ?,
+            owner_contact = ?
+        WHERE id = ? AND deleted = 0 AND adopted = 0
+    ''', (adoption_date, owner_name, owner_contact, animal_id))
     conn.commit()
     conn.close()
 
@@ -265,10 +277,14 @@ def get_animal_by_id(animal_id):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute('''
-        SELECT id, name, species, birth_date, age_estimated,
-               arrival_date, cage_number, quarantine_until
+        SELECT 
+            id, name, species, birth_date, 
+            age_estimated, arrival_date, 
+            cage_number, quarantine_until,
+            deleted, adopted, adoption_date,
+            owner_name, owner_contact
         FROM animals
-        WHERE id = ?
+        WHERE id = ? AND deleted = 0 AND adopted = 0
     ''', (animal_id,))
     row = cur.fetchone()
     conn.close()
@@ -276,19 +292,15 @@ def get_animal_by_id(animal_id):
 
 def get_all_adoptions():
     """
-    Возвращает все записи из таблицы adoptions:
-      (id, animal_id, name, species, birth_date,
-       age_estimated, arrival_date, owner_name,
-       owner_contact, adoption_date)
+    Возвращает всех усыновленных животных
     """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     cur.execute('''
-        SELECT
-            id, animal_id, name, species,
-            birth_date, age_estimated, arrival_date,
-            owner_name, owner_contact, adoption_date
-        FROM adoptions
+        SELECT id, name, species, birth_date, age_estimated,
+               arrival_date, adoption_date, owner_name, owner_contact
+        FROM animals
+        WHERE adopted = 1 AND deleted = 0
     ''')
     rows = cur.fetchall()
     conn.close()
@@ -296,8 +308,7 @@ def get_all_adoptions():
 
 def get_all_animals():
     """
-    Возвращает кортежи:
-    (id, name, species, birth_date, age_estimated, arrival_date, cage_number, quarantine_until)
+    Возвращает только неудалённых животных
     """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -305,6 +316,7 @@ def get_all_animals():
         SELECT id, name, species, birth_date, age_estimated,
                arrival_date, cage_number, quarantine_until
         FROM animals
+        WHERE deleted = 0 AND adopted = 0
     ''')
     rows = cur.fetchall()
     conn.close()
@@ -312,11 +324,16 @@ def get_all_animals():
 
 def get_all_cage_numbers():
     """
-    Возвращает список всех занятых cage_number (строки) из БД.
+    Возвращает клетки только неудалённых животных
     """
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute('SELECT cage_number FROM animals WHERE cage_number IS NOT NULL')
+    cur.execute('''
+        SELECT cage_number 
+        FROM animals 
+        WHERE cage_number IS NOT NULL 
+          AND deleted = 0 AND adopted = 0
+    ''')
     rows = [row[0] for row in cur.fetchall()]
     conn.close()
     return rows
@@ -334,16 +351,23 @@ def add_animal(name, species, birth_date, age_estimated,
           arrival_date, cage_number, quarantine_until))
     conn.commit()
     new_id = cur.lastrowid
-    new_id = cur.lastrowid
     conn.close()
-    return new_id
-    return new_id
+    return new_id  # Исправлено: убрано дублирование return
 
 
 def delete_animal(animal_id):
+    """Мягкое удаление животного (устанавливает флаг deleted)"""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute('DELETE FROM animals WHERE id = ?', (animal_id,))
+    cur.execute('UPDATE animals SET deleted = 1 WHERE id = ?', (animal_id,))
+    conn.commit()
+    conn.close()
+
+def delete_event(event_id: int):
+    """Мягкое удаление события (устанавливает флаг deleted)"""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute('UPDATE events SET deleted = 1 WHERE id = ?', (event_id,))
     conn.commit()
     conn.close()
 
@@ -357,124 +381,10 @@ def update_animal_field(animal_id, field, value):
     conn.close()
 
 def get_all_animals_ids():
+    """Возвращает ID и имена только неудалённых животных"""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cur.execute("SELECT id, name FROM animals")
-    out = cur.fetchall()
-    conn.close()
-    return out  # list of (id, name)
-
-def get_medical(animal_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT quarantine_days, notes FROM medical WHERE animal_id=?", (animal_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row or (0, '')
-
-def upsert_medical(animal_id, quarantine_days, notes):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      INSERT INTO medical(animal_id, quarantine_days, notes)
-        VALUES (?, ?, ?)
-      ON CONFLICT(animal_id) DO UPDATE
-        SET quarantine_days=?, notes=?
-    ''', (animal_id, quarantine_days, notes, quarantine_days, notes))
-    conn.commit()
-    conn.close()
-
-def get_procedures(animal_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      SELECT id, type, scheduled, completed, completed_at, result
-      FROM procedures WHERE animal_id=?
-      ORDER BY scheduled
-    ''', (animal_id,))
+    cur.execute("SELECT id, name FROM animals WHERE deleted = 0 AND adopted = 0")
     out = cur.fetchall()
     conn.close()
     return out
-
-def schedule_procedure(animal_id, type_, scheduled_iso):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      INSERT INTO procedures(animal_id,type,scheduled,completed)
-      VALUES (?,?,?,0)
-    ''', (animal_id, type_, scheduled_iso))
-    conn.commit()
-    conn.close()
-
-def complete_procedure(proc_id, completed_at_iso, result_text):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      UPDATE procedures
-      SET completed=1, completed_at=?, result=?
-      WHERE id=?
-    ''', (completed_at_iso, result_text, proc_id))
-    conn.commit()
-    conn.close()
-def get_all_animals_ids():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT id, name FROM animals")
-    out = cur.fetchall()
-    conn.close()
-    return out  # list of (id, name)
-
-def get_medical(animal_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT quarantine_days, notes FROM medical WHERE animal_id=?", (animal_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row or (0, '')
-
-def upsert_medical(animal_id, quarantine_days, notes):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      INSERT INTO medical(animal_id, quarantine_days, notes)
-        VALUES (?, ?, ?)
-      ON CONFLICT(animal_id) DO UPDATE
-        SET quarantine_days=?, notes=?
-    ''', (animal_id, quarantine_days, notes, quarantine_days, notes))
-    conn.commit()
-    conn.close()
-
-def get_procedures(animal_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      SELECT id, type, scheduled, completed, completed_at, result
-      FROM procedures WHERE animal_id=?
-      ORDER BY scheduled
-    ''', (animal_id,))
-    out = cur.fetchall()
-    conn.close()
-    return out
-
-def schedule_procedure(animal_id, type_, scheduled_iso):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      INSERT INTO procedures(animal_id,type,scheduled,completed)
-      VALUES (?,?,?,0)
-    ''', (animal_id, type_, scheduled_iso))
-    conn.commit()
-    conn.close()
-
-def complete_procedure(proc_id, completed_at_iso, result_text):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute('''
-      UPDATE procedures
-      SET completed=1, completed_at=?, result=?
-      WHERE id=?
-    ''', (completed_at_iso, result_text, proc_id))
-    conn.commit()
-    conn.close()
-
-
