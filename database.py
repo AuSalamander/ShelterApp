@@ -3,7 +3,7 @@ import os
 import glob
 import json
 
-DB_NAME = "test_shelter.db"
+DB_NAME = "shelter.db"
 
 def add_event_doc(event_id: int, filename: str):
     """Сохраняет в БД, что к событию прикреплён уже существующий файл filename."""
