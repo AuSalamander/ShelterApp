@@ -343,10 +343,30 @@ class MedicalTab:
                 col = ttk.Frame(events_frame, width=COL_W, relief='groove', padding=5)
                 col.grid(row=0, column=idx, padx=( PAD_X, 0), sticky='ns')
 
+                # Конфигурируем колонки внутри карточки события
+                col.columnconfigure(0, weight=1)  # Колонка для основного контента
+                col.columnconfigure(1, weight=0)  # Колонка для кнопки удаления
+
                 # === row 0: Тип события ===
                 row_type = 0
-                lbl_type = ttk.Label(col, text=etype, font=("", 10, "bold"))
+                lbl_type = ttk.Label(col, text=f"{eid}: {etype}", font=("", 10, "bold"))
                 lbl_type.grid(row=row_type, column=0, sticky='w', pady=(0,4))
+
+                # Кнопка удаления события
+                def _confirm_and_delete_event_handler(event_id_to_delete, animal_id_to_refresh):
+                    confirm_message = f"Вы уверены, что хотите удалить событие «{event_id_to_delete}»?"
+                    if messagebox.askyesno("Подтверждение удаления", confirm_message, parent=self.frame):
+                        database.delete_event(event_id_to_delete)
+                        self.open_medical_card(animal_id_to_refresh)
+                
+                delete_event_button = ttk.Button(
+                    col,
+                    text="×",
+                    width=3, 
+                    command=lambda current_event_id=eid, current_animal_id=animal_id: \
+                        _confirm_and_delete_event_handler(current_event_id, current_animal_id)
+                )
+                delete_event_button.grid(row=row_type, column=1, sticky='ne', padx=3, pady=3)
 
                 # Фабрика колбэка для редактирования типа
                 def make_type_editor(frame=col, r=row_type, original=etype, ev_id=eid):
